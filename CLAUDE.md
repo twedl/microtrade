@@ -27,7 +27,7 @@ Runtime pipeline (`src/microtrade/`):
 - `excel_spec.py` — one-shot converter: Excel workbook (one sheet per trade type) → YAML specs. Never called on the hot path; driven by `microtrade import-spec PATH.xlsx --effective-from YYYY-MM`.
 - `ingest.py` — streams FWF from the zip via `zipfile.ZipFile.open()` (no extraction), slices lines by `(start, length)`, casts to spec dtypes, yields `pyarrow.RecordBatch`es in `chunk_rows` batches.
 - `write.py` — `PartitionWriter` opens `pyarrow.parquet.ParquetWriter` on `year=YYYY/month=MM/part-0.parquet.tmp`, flushes batches one row-group at a time, then atomic-renames on success (idempotent + crash-safe).
-- `pipeline.py` — orchestrates discover → schema → ingest → write, appending a per-run JSONL manifest under `output/<trade_type>/_manifests/`.
+- `pipeline.py` — orchestrates discover → schema → ingest → write, appending a per-run JSONL manifest under `output/_manifests/<trade_type>/` (kept outside the dataset root so `pl.scan_parquet(..., hive_partitioning=True)` doesn't trip on non-parquet siblings).
 - `cli.py` — Typer app: `ingest`, `import-spec`, `validate-specs`, `inspect`, `version`.
 
 Key invariants:
@@ -46,4 +46,4 @@ Key invariants:
 
 ## Current build state
 
-Phase 1 (scaffolding) is landed: package skeleton, CLI with stub subcommands, tooling, smoke tests. Subsequent phases implement `excel_spec` → `schema`/`discover` → `ingest`/`write` → `pipeline`. See `/root/.claude/plans/work-back-and-forth-radiant-goose.md` for the full plan.
+Phases 1-4 are landed: scaffolding, Excel→YAML converter + `import-spec` CLI, `discover`/`ingest`/`write` (streaming FWF → atomic Parquet), and `pipeline.run` + `microtrade ingest` CLI with per-run JSONL manifests. Remaining: `validate-specs` and `inspect` CLI commands (currently stubbed), importing real workbook specs into `src/microtrade/specs/`, and a final README pass. See `/root/.claude/plans/work-back-and-forth-radiant-goose.md` for the full plan.

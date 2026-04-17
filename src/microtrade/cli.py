@@ -1,7 +1,11 @@
 """Typer CLI entry point.
 
-Phase 2 wires `import-spec`; `ingest`, `validate-specs`, and `inspect` remain
-stubs until later phases.
+Commands:
+    version        - print the installed microtrade version
+    ingest         - process zipped FWF inputs into Hive-partitioned Parquet
+    import-spec    - convert an Excel schema workbook into versioned YAML specs
+    validate-specs - lint YAML specs and print a changelog across versions (stub)
+    inspect        - dump first rows and resolved spec for one zip (stub)
 """
 
 from __future__ import annotations
@@ -10,7 +14,8 @@ from pathlib import Path
 
 import typer
 
-from microtrade import __version__, excel_spec, schema
+from microtrade import __version__, excel_spec, pipeline, schema
+from microtrade.ingest import DEFAULT_CHUNK_ROWS
 
 app = typer.Typer(
     name="microtrade",
@@ -29,12 +34,70 @@ def version() -> None:
 
 @app.command()
 def ingest(
-    input_dir: Path = typer.Option(..., "--input", exists=True, file_okay=False),
-    output_dir: Path = typer.Option(..., "--output", file_okay=False),
-    ytd: bool = typer.Option(True, "--ytd/--all"),
+    input_dir: Path = typer.Option(
+        ..., "--input", exists=True, file_okay=False, help="Directory of raw zips."
+    ),
+    output_dir: Path = typer.Option(
+        ..., "--output", file_okay=False, help="Root of the per-trade-type Parquet datasets."
+    ),
+    spec_dir: Path = typer.Option(
+        DEFAULT_SPEC_DIR,
+        "--spec-dir",
+        exists=True,
+        file_okay=False,
+        help="Directory containing <trade_type>/v<effective_from>.yaml specs.",
+    ),
+    trade_types: list[str] = typer.Option(
+        [],
+        "--type",
+        help="Limit to these trade types (may be repeated). Default: all three.",
+    ),
+    year: int | None = typer.Option(None, "--year", help="Process only this calendar year."),
+    month: int | None = typer.Option(None, "--month", help="Process only this month (1-12)."),
+    ytd: bool = typer.Option(
+        True,
+        "--ytd/--all",
+        help="YTD (current year only) vs. all years in the input dir. Ignored when --year is set.",
+    ),
+    current_year: int | None = typer.Option(
+        None,
+        "--current-year",
+        help="Override 'today' year for YTD selection (primarily for testing).",
+        hidden=True,
+    ),
+    chunk_rows: int = typer.Option(
+        DEFAULT_CHUNK_ROWS,
+        "--chunk-rows",
+        help="Rows per streaming RecordBatch / Parquet row group.",
+    ),
+    compression: str = typer.Option("zstd", "--compression"),
+    encoding: str = typer.Option("utf-8", "--encoding"),
 ) -> None:
-    """Process zipped FWF inputs into Hive-partitioned Parquet (stub)."""
-    _not_implemented("ingest", input_dir=input_dir, output_dir=output_dir, ytd=ytd)
+    """Process zipped FWF inputs into per-type Hive-partitioned Parquet datasets."""
+    wanted_types = tuple(trade_types) if trade_types else schema.TRADE_TYPES
+    unknown = [t for t in wanted_types if t not in schema.TRADE_TYPES]
+    if unknown:
+        typer.echo(f"unknown trade types: {unknown}", err=True)
+        raise typer.Exit(code=2)
+
+    config = pipeline.PipelineConfig(
+        input_dir=input_dir,
+        output_dir=output_dir,
+        spec_dir=spec_dir,
+        trade_types=wanted_types,
+        ytd=ytd,
+        current_year=current_year,
+        year=year,
+        month=month,
+        chunk_rows=chunk_rows,
+        compression=compression,
+        encoding=encoding,
+    )
+
+    summary = pipeline.run(config)
+    _print_summary(summary)
+    if summary.failed_count > 0:
+        raise typer.Exit(code=1)
 
 
 @app.command("import-spec")
@@ -63,7 +126,7 @@ def import_spec(
         typer.echo(f"wrote {target} ({len(spec.columns)} columns)")
         if previous is not None:
             diff = schema.diff_specs(previous, spec)
-            _print_diff(previous, spec, diff)
+            _print_diff(previous, diff)
 
 
 @app.command("validate-specs")
@@ -86,7 +149,7 @@ def _latest_previous(spec_dir: Path, trade_type: str, effective_from: str) -> sc
     return max(earlier, key=lambda s: s.effective_from) if earlier else None
 
 
-def _print_diff(previous: schema.Spec, current: schema.Spec, diff: schema.SpecDiff) -> None:
+def _print_diff(previous: schema.Spec, diff: schema.SpecDiff) -> None:
     if diff.is_empty:
         typer.echo(f"  diff vs v{previous.effective_from}: no column changes")
         return
@@ -97,6 +160,20 @@ def _print_diff(previous: schema.Spec, current: schema.Spec, diff: schema.SpecDi
         typer.echo(f"    - {col.name} ({col.dtype})")
     for old, new in diff.changed:
         typer.echo(f"    ~ {old.name}: {old.dtype}/{old.length} -> {new.dtype}/{new.length}")
+
+
+def _print_summary(summary: pipeline.RunSummary) -> None:
+    typer.echo(
+        f"run {summary.run_id}: {summary.ok_count} ok, {summary.failed_count} failed, "
+        f"{summary.total_rows} rows"
+    )
+    for r in summary.results:
+        status = r.status.upper()
+        typer.echo(
+            f"  [{status}] {r.trade_type} {r.year:04d}-{r.month:02d} "
+            f"rows={r.rows_written} ({r.duration_seconds:.2f}s) -> {r.output_path}"
+            + (f"  error={r.error}" if r.error else "")
+        )
 
 
 def _not_implemented(name: str, **kwargs: object) -> None:
