@@ -235,6 +235,48 @@ def file_sha256(path: Path) -> str:
 
 
 @dataclass(frozen=True)
+class CanonicalColumn:
+    """Logical column definition for a dataset's union schema across spec versions."""
+
+    name: str
+    dtype: str
+    nullable: bool
+
+
+def canonical_columns(specs: list[Spec]) -> tuple[CanonicalColumn, ...]:
+    """Compute the union of columns across a trade type's committed specs.
+
+    Columns are ordered by first appearance. When a column's dtype or
+    nullability changes between versions, the latest spec wins; the dtype
+    must stay in `CANONICAL_DTYPES`. Raises `SpecError` if two specs
+    disagree on a column's dtype (a widening change we don't auto-resolve).
+    """
+    ordered_names: list[str] = []
+    seen: dict[str, CanonicalColumn] = {}
+    for spec in sorted(specs, key=lambda s: s.effective_from):
+        for col in spec.ordered_columns:
+            existing = seen.get(col.name)
+            if existing is None:
+                ordered_names.append(col.name)
+                seen[col.name] = CanonicalColumn(
+                    name=col.name, dtype=col.dtype, nullable=col.nullable
+                )
+                continue
+            if existing.dtype != col.dtype:
+                raise SpecError(
+                    f"column {col.name!r} changes dtype across spec versions: "
+                    f"{existing.dtype!r} -> {col.dtype!r}"
+                )
+            # Widen nullability: once nullable, always nullable in the canonical view.
+            seen[col.name] = CanonicalColumn(
+                name=col.name,
+                dtype=col.dtype,
+                nullable=existing.nullable or col.nullable,
+            )
+    return tuple(seen[n] for n in ordered_names)
+
+
+@dataclass(frozen=True)
 class SpecDiff:
     added: tuple[Column, ...] = field(default_factory=tuple)
     removed: tuple[Column, ...] = field(default_factory=tuple)

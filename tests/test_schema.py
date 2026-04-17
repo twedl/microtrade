@@ -11,6 +11,7 @@ from microtrade.schema import (
     Spec,
     SpecError,
     SpecSource,
+    canonical_columns,
     diff_specs,
     load_all,
     load_spec,
@@ -153,3 +154,32 @@ def test_diff_specs_detects_added_removed_changed() -> None:
 
 def test_diff_specs_empty_when_identical() -> None:
     assert diff_specs(_spec(), _spec()).is_empty
+
+
+def test_canonical_columns_unions_across_versions() -> None:
+    cols_v1 = (
+        Column(name="a", start=1, length=5, dtype="Utf8", nullable=False),
+        Column(name="b", start=6, length=5, dtype="Int64", nullable=False),
+    )
+    cols_v2 = (
+        Column(name="a", start=1, length=5, dtype="Utf8", nullable=True),  # widened
+        Column(name="b", start=6, length=5, dtype="Int64", nullable=False),
+        Column(name="c", start=11, length=5, dtype="Float64", nullable=True),  # added
+    )
+    v1 = _spec(effective_from="2020-01", columns=cols_v1, record_length=10)
+    v2 = _spec(effective_from="2024-01", columns=cols_v2, record_length=15)
+
+    canonical = canonical_columns([v1, v2])
+    assert [c.name for c in canonical] == ["a", "b", "c"]
+    by_name = {c.name: c for c in canonical}
+    assert by_name["a"].nullable is True  # widened once seen nullable
+    assert by_name["c"].dtype == "Float64"
+
+
+def test_canonical_columns_rejects_dtype_conflict() -> None:
+    cols_v1 = (Column(name="a", start=1, length=5, dtype="Utf8"),)
+    cols_v2 = (Column(name="a", start=1, length=5, dtype="Int64"),)
+    v1 = _spec(effective_from="2020-01", columns=cols_v1, record_length=5)
+    v2 = _spec(effective_from="2024-01", columns=cols_v2, record_length=5)
+    with pytest.raises(SpecError, match="changes dtype"):
+        canonical_columns([v1, v2])
