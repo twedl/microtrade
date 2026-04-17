@@ -11,6 +11,9 @@ repos:
       - id: mypy
         additional_dependencies:
           - types-PyYAML
+          - polars>=1.20
+          - pyarrow>=17
+          - typer>=0.12
         args: [--config-file=pyproject.toml]
         pass_filenames: false
         files: ^src/microtrade/
