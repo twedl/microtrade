@@ -316,3 +316,91 @@ def test_cli_ingest_exits_nonzero_on_failure(prepared_env) -> None:
     )
     assert result.exit_code == 1
     assert "6 failed" in result.output
+
+
+def test_cli_inspect_annotates_first_rows(prepared_env) -> None:
+    env = prepared_env
+    zip_path = env["input"] / "imports_202401.zip"
+
+    result = CliRunner().invoke(
+        app,
+        ["inspect", str(zip_path), "--spec-dir", str(env["spec"]), "--rows", "2"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "imports 2024-01" in result.output
+    assert "v2020-01" in result.output
+    # Every spec column name appears in the annotated dump.
+    for col_name in ("period", "hs_code", "value_usd"):
+        assert col_name in result.output
+    assert "line 1" in result.output
+    assert "line 2" in result.output
+
+
+def test_cli_inspect_raw_skips_annotation(prepared_env) -> None:
+    env = prepared_env
+    zip_path = env["input"] / "imports_202401.zip"
+
+    result = CliRunner().invoke(
+        app,
+        ["inspect", str(zip_path), "--spec-dir", str(env["spec"]), "--rows", "1", "--raw"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "line 1" in result.output
+    # Raw mode does not emit the `[start..end] dtype` annotation table.
+    assert "Utf8" not in result.output
+    assert "Int64" not in result.output
+
+
+def test_cli_inspect_accepts_plain_fwf_with_overrides(prepared_env, tmp_path: Path) -> None:
+    env = prepared_env
+    workbook = env["tmp"] / "schema_workbook.xlsx"
+    imports_spec = excel_spec.read_workbook(workbook, "2020-01")["imports"]
+    lines = render_fwf_lines(imports_spec, n_rows=2, seed=0)
+    fwf_path = tmp_path / "imports.fwf"
+    fwf_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "inspect",
+            str(fwf_path),
+            "--spec-dir",
+            str(env["spec"]),
+            "--type",
+            "imports",
+            "--period",
+            "2024-01",
+            "--rows",
+            "1",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "imports 2024-01" in result.output
+    assert "v2020-01" in result.output
+
+
+def test_cli_inspect_rejects_unresolvable_filename(tmp_path: Path, prepared_env) -> None:
+    env = prepared_env
+    weird = tmp_path / "not_a_trade_drop.fwf"
+    weird.write_text("whatever\n", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        app,
+        ["inspect", str(weird), "--spec-dir", str(env["spec"])],
+    )
+    assert result.exit_code == 2
+    assert "filename does not match" in result.output
+
+
+def test_cli_inspect_errors_when_no_spec(prepared_env) -> None:
+    env = prepared_env
+    zip_path = env["input"] / "imports_202401.zip"
+    for yaml_file in (env["spec"] / "imports").rglob("*.yaml"):
+        yaml_file.unlink()
+
+    result = CliRunner().invoke(
+        app,
+        ["inspect", str(zip_path), "--spec-dir", str(env["spec"])],
+    )
+    assert result.exit_code == 2
+    assert "no specs found" in result.output

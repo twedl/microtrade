@@ -5,16 +5,20 @@ Commands:
     ingest         - process zipped FWF inputs into Hive-partitioned Parquet
     import-spec    - convert an Excel schema workbook into versioned YAML specs
     validate-specs - lint YAML specs and print a changelog across versions (stub)
-    inspect        - dump first rows and resolved spec for one zip (stub)
+    inspect        - dump the resolved spec and first rows of a raw file
 """
 
 from __future__ import annotations
 
+import io
+import zipfile
+from collections.abc import Iterator
 from pathlib import Path
+from typing import IO
 
 import typer
 
-from microtrade import __version__, excel_spec, pipeline, schema
+from microtrade import __version__, discover, excel_spec, pipeline, schema
 from microtrade.ingest import DEFAULT_CHUNK_ROWS
 
 app = typer.Typer(
@@ -138,9 +142,117 @@ def validate_specs(
 
 
 @app.command()
-def inspect(path: Path = typer.Argument(..., exists=True, dir_okay=False)) -> None:
-    """Dump first rows and resolved spec for a raw zip (stub)."""
-    _not_implemented("inspect", path=path)
+def inspect(
+    path: Path = typer.Argument(..., exists=True, dir_okay=False),
+    spec_dir: Path = typer.Option(
+        DEFAULT_SPEC_DIR,
+        "--spec-dir",
+        exists=True,
+        file_okay=False,
+        help="Directory containing <trade_type>/v<effective_from>.yaml specs.",
+    ),
+    trade_type: str | None = typer.Option(
+        None,
+        "--type",
+        help="Trade type override; needed if the filename is non-canonical.",
+    ),
+    period: str | None = typer.Option(
+        None,
+        "--period",
+        help="YYYY-MM override; needed if the filename is non-canonical.",
+    ),
+    rows: int = typer.Option(5, "--rows", "-n", help="Number of data rows to show (0 = none)."),
+    raw: bool = typer.Option(
+        False, "--raw", help="Print full lines without per-column annotation."
+    ),
+    encoding: str = typer.Option("utf-8", "--encoding"),
+) -> None:
+    """Dump the resolved spec and first rows of a raw trade file.
+
+    Accepts either a `<trade_type>_<YYYYMM>.zip` (filename drives spec
+    resolution) or a plain FWF file (pass `--type` and `--period`).
+    """
+    resolved_type, resolved_period = _resolve_inspect_target(path, trade_type, period)
+
+    specs = schema.load_all(spec_dir, resolved_type)
+    if not specs:
+        typer.echo(f"no specs found for trade_type {resolved_type!r} under {spec_dir}", err=True)
+        raise typer.Exit(code=2)
+    try:
+        spec = schema.resolve(specs, resolved_period)
+    except schema.SpecError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+
+    typer.echo(f"file:   {path.name}  ({resolved_type} {resolved_period})")
+    typer.echo(
+        f"spec:   v{spec.version}  record_length={spec.record_length}  columns={len(spec.columns)}"
+    )
+    if rows <= 0:
+        return
+    typer.echo("")
+    for line_no, line in _iter_inspect_lines(path, encoding=encoding, limit=rows):
+        _print_inspect_row(line, spec, line_no, annotated=not raw)
+
+
+def _resolve_inspect_target(
+    path: Path, trade_type: str | None, period: str | None
+) -> tuple[str, str]:
+    parsed = discover.parse_filename(path)
+    resolved_type = trade_type or (parsed.trade_type if parsed is not None else None)
+    resolved_period = period or (parsed.period if parsed is not None else None)
+    if resolved_type is None or resolved_period is None:
+        typer.echo(
+            f"{path.name}: filename does not match <trade_type>_<YYYYMM>.zip; "
+            f"pass --type and --period to inspect anyway.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    if resolved_type not in schema.TRADE_TYPES:
+        typer.echo(f"unknown trade_type {resolved_type!r}", err=True)
+        raise typer.Exit(code=2)
+    try:
+        schema.validate_period(resolved_period)
+    except schema.SpecError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    return resolved_type, resolved_period
+
+
+def _iter_inspect_lines(path: Path, *, encoding: str, limit: int) -> Iterator[tuple[int, str]]:
+    if path.suffix.lower() == ".zip":
+        with zipfile.ZipFile(path) as zf:
+            members = [m for m in zf.infolist() if not m.is_dir()]
+            if len(members) != 1:
+                typer.echo(
+                    f"{path.name}: expected exactly one inner file, found "
+                    f"{[m.filename for m in members]}",
+                    err=True,
+                )
+                raise typer.Exit(code=2)
+            with zf.open(members[0]) as binstream:
+                yield from _first_lines(binstream, encoding=encoding, limit=limit)
+        return
+    with path.open("rb") as binstream:
+        yield from _first_lines(binstream, encoding=encoding, limit=limit)
+
+
+def _first_lines(binstream: IO[bytes], *, encoding: str, limit: int) -> Iterator[tuple[int, str]]:
+    text = io.TextIOWrapper(binstream, encoding=encoding, newline="")
+    for line_no, raw_line in enumerate(text, start=1):
+        if line_no > limit:
+            return
+        yield line_no, raw_line.rstrip("\n").rstrip("\r")
+
+
+def _print_inspect_row(line: str, spec: schema.Spec, line_no: int, *, annotated: bool) -> None:
+    typer.echo(f"--- line {line_no} (length={len(line)}) ---")
+    if not annotated:
+        typer.echo(line)
+        return
+    for col in spec.ordered_columns:
+        chunk = line[col.start - 1 : col.start - 1 + col.length]
+        typer.echo(f"  {col.name:<24} [{col.start:>4}..{col.end:>4}] {col.dtype:<7} {chunk!r}")
 
 
 def _latest_previous(spec_dir: Path, trade_type: str, effective_from: str) -> schema.Spec | None:
