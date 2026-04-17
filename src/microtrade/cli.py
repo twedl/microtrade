@@ -154,12 +154,14 @@ def inspect(
     trade_type: str | None = typer.Option(
         None,
         "--type",
-        help="Trade type override; needed if the filename is non-canonical.",
+        help="Trade type override; defaults to parse from filename. "
+        "Required if the filename is not `<trade_type>_<YYYYMM>.zip`.",
     ),
     period: str | None = typer.Option(
         None,
         "--period",
-        help="YYYY-MM override; needed if the filename is non-canonical.",
+        help="Period (YYYY-MM) override; defaults to parse from filename. "
+        "Required if the filename is not `<trade_type>_<YYYYMM>.zip`.",
     ),
     rows: int = typer.Option(5, "--rows", "-n", help="Number of data rows to show (0 = none)."),
     raw: bool = typer.Option(
@@ -220,21 +222,34 @@ def _resolve_inspect_target(
 
 
 def _iter_inspect_lines(path: Path, *, encoding: str, limit: int) -> Iterator[tuple[int, str]]:
-    if path.suffix.lower() == ".zip":
-        with zipfile.ZipFile(path) as zf:
-            members = [m for m in zf.infolist() if not m.is_dir()]
-            if len(members) != 1:
-                typer.echo(
-                    f"{path.name}: expected exactly one inner file, found "
-                    f"{[m.filename for m in members]}",
-                    err=True,
-                )
-                raise typer.Exit(code=2)
-            with zf.open(members[0]) as binstream:
-                yield from _first_lines(binstream, encoding=encoding, limit=limit)
-        return
-    with path.open("rb") as binstream:
-        yield from _first_lines(binstream, encoding=encoding, limit=limit)
+    # Content-sniff rather than trusting the suffix so `.fwf` zips and
+    # extension-less files both route correctly.
+    is_zip = zipfile.is_zipfile(path)
+    try:
+        if is_zip:
+            with zipfile.ZipFile(path) as zf:
+                members = [m for m in zf.infolist() if not m.is_dir()]
+                if len(members) != 1:
+                    typer.echo(
+                        f"{path.name}: expected exactly one inner file, found "
+                        f"{[m.filename for m in members]}",
+                        err=True,
+                    )
+                    raise typer.Exit(code=2)
+                with zf.open(members[0]) as binstream:
+                    yield from _first_lines(binstream, encoding=encoding, limit=limit)
+            return
+        with path.open("rb") as binstream:
+            yield from _first_lines(binstream, encoding=encoding, limit=limit)
+    except zipfile.BadZipFile as exc:
+        typer.echo(f"{path.name}: malformed zip: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    except UnicodeDecodeError as exc:
+        typer.echo(
+            f"{path.name}: cannot decode as {encoding} at byte {exc.start}: {exc.reason}",
+            err=True,
+        )
+        raise typer.Exit(code=2) from exc
 
 
 def _first_lines(binstream: IO[bytes], *, encoding: str, limit: int) -> Iterator[tuple[int, str]]:
