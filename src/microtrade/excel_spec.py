@@ -1,17 +1,26 @@
 """One-shot converter: Excel schema workbook -> versioned YAML specs.
 
-The workbook is expected to have one sheet per trade type
-(`imports`, `exports_us`, `exports_nonus`) with a header row containing
-the following columns (case-insensitive, order-agnostic):
+Real workbooks supplied upstream use a layout that is loose by spreadsheet
+standards: sheets are ordered (sheet 1 = imports, 2 = exports_us, 3 =
+exports_nonus) regardless of name, the field table sits below a few preamble
+rows, and the table itself reads `Position | Description | Length | Type` with
+``Blank`` rows interleaved as FWF filler bytes that are not real fields.
 
-    name | start | length | dtype | nullable | description
+This module:
 
-Only `name`, `start`, `length`, `dtype` are required; `nullable` defaults to
-True and `description` to None. `dtype` is normalized to one of the canonical
-Polars dtype names (Utf8, Int64, Float64, Date).
+- maps the first three sheets positionally onto :data:`TRADE_TYPES`,
+- autodetects the header row by looking for `Position`, `Description`,
+  `Length`, `Type` (case-insensitive) in the same row,
+- skips rows whose Description is `Blank` (FWF padding),
+- normalizes the `Type` token to one of the canonical Polars dtype names
+  (Utf8, Int64, Float64, Date),
+- preserves the rightmost extent (Blank or real) as the spec's
+  ``record_length`` so FWF line-length validation matches the source layout.
 
-This module is invoked via `microtrade import-spec PATH.xlsx --effective-from YYYY-MM`
-and never runs on the ingest hot path.
+Optional `Nullable` and `Parse` columns are honored when present; otherwise
+columns default to nullable + the dtype's default parse string. This module
+runs only via `microtrade import-spec PATH.xlsx --effective-from YYYY-MM` and
+never on the ingest hot path.
 """
 
 from __future__ import annotations
@@ -34,8 +43,9 @@ from microtrade.schema import (
     validate_spec,
 )
 
-REQUIRED_HEADERS: tuple[str, ...] = ("name", "start", "length", "dtype")
-OPTIONAL_HEADERS: tuple[str, ...] = ("nullable", "description", "parse")
+REQUIRED_HEADERS: tuple[str, ...] = ("position", "description", "length", "type")
+OPTIONAL_HEADERS: tuple[str, ...] = ("nullable", "parse")
+_HEADER_TOKENS: frozenset[str] = frozenset(REQUIRED_HEADERS)
 
 _DTYPE_ALIASES: Mapping[str, str] = {
     "string": "Utf8",
@@ -49,10 +59,14 @@ _DTYPE_ALIASES: Mapping[str, str] = {
     "bigint": "Int64",
     "long": "Int64",
     "int64": "Int64",
+    # Real workbooks tag numeric columns as `Num`; default to Int64. If a
+    # specific column needs Float64 the user can override the YAML by hand.
+    "num": "Int64",
+    "number": "Int64",
+    "numeric": "Int64",
     "float": "Float64",
     "double": "Float64",
     "decimal": "Float64",
-    "numeric": "Float64",
     "float64": "Float64",
     "date": "Date",
     "yyyymmdd": "Date",
@@ -64,6 +78,8 @@ _PARSE_FOR_DTYPE: Mapping[str, str | None] = {
     "Float64": None,
     "Date": "yyyymmdd_to_date",
 }
+
+_BLANK_FIELD: str = "blank"
 
 
 def normalize_dtype(raw: str) -> str:
@@ -88,27 +104,68 @@ def _coerce_bool(value: Any) -> bool:
     raise SpecError(f"cannot interpret {value!r} as boolean for 'nullable'")
 
 
-def _row_to_column(row: dict[str, Any]) -> Column:
+def _cell_str(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _cell_int(value: Any, *, field: str) -> int:
+    text = _cell_str(value)
+    if not text:
+        raise SpecError(f"{field}: missing value")
     try:
-        name = str(row["name"]).strip()
-        start = int(row["start"])
-        length = int(row["length"])
-        dtype = normalize_dtype(str(row["dtype"]))
-    except (KeyError, TypeError, ValueError) as exc:
-        raise SpecError(f"invalid column row {row!r}: {exc}") from exc
+        # Cast through float to tolerate Excel's numeric coercion ("345.0").
+        return int(float(text))
+    except ValueError as exc:
+        raise SpecError(f"{field}: cannot read {value!r} as integer") from exc
 
-    nullable_raw = row.get("nullable")
-    nullable = _coerce_bool(nullable_raw) if nullable_raw is not None else True
 
-    parse_raw = row.get("parse")
-    parse = str(parse_raw).strip() if parse_raw not in (None, "") else _PARSE_FOR_DTYPE.get(dtype)
+def _find_header_row(df: pl.DataFrame, sheet: str) -> int:
+    for i, row in enumerate(df.iter_rows()):
+        tokens = {str(c).strip().lower() for c in row if c is not None}
+        if _HEADER_TOKENS.issubset(tokens):
+            return i
+    raise SpecError(
+        f"sheet {sheet!r}: could not find a header row containing {sorted(_HEADER_TOKENS)}"
+    )
 
-    description_raw = row.get("description")
-    description = str(description_raw).strip() if description_raw not in (None, "") else None
 
+def _header_index(row: tuple[Any, ...]) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for i, cell in enumerate(row):
+        key = _cell_str(cell).lower()
+        if key:
+            out.setdefault(key, i)
+    return out
+
+
+def _row_to_column(
+    row: tuple[Any, ...],
+    *,
+    pos_idx: int,
+    desc_idx: int,
+    len_idx: int,
+    type_idx: int,
+    nullable_idx: int | None,
+    parse_idx: int | None,
+    sheet: str,
+    line_no: int,
+) -> Column:
+    where = f"sheet {sheet!r} row {line_no}"
+    start = _cell_int(row[pos_idx], field=f"{where} Position")
+    length = _cell_int(row[len_idx], field=f"{where} Length")
+    name = _cell_str(row[desc_idx])
     if not name:
-        raise SpecError(f"column name missing in row {row!r}")
-
+        raise SpecError(f"{where}: Description is empty")
+    dtype = normalize_dtype(_cell_str(row[type_idx]) or "")
+    nullable = (
+        _coerce_bool(row[nullable_idx])
+        if nullable_idx is not None and row[nullable_idx] is not None
+        else True
+    )
+    parse_raw = row[parse_idx] if parse_idx is not None else None
+    parse = _cell_str(parse_raw) if parse_raw not in (None, "") else _PARSE_FOR_DTYPE.get(dtype)
     return Column(
         name=name,
         start=start,
@@ -116,30 +173,67 @@ def _row_to_column(row: dict[str, Any]) -> Column:
         dtype=dtype,
         nullable=nullable,
         parse=parse,
-        description=description,
+        description=None,
     )
 
 
-def _sheet_to_columns(df: pl.DataFrame, sheet: str) -> tuple[Column, ...]:
-    headers = {h.lower(): h for h in df.columns}
-    missing = [h for h in REQUIRED_HEADERS if h not in headers]
+def _sheet_to_layout(df: pl.DataFrame, sheet: str) -> tuple[tuple[Column, ...], int]:
+    """Parse a sheet into (real columns, record_length).
+
+    `record_length` is the rightmost extent across every parsable row in the
+    field table - including `Blank` filler rows - so it matches the actual
+    FWF line length even when filler trails the last real column.
+    """
+    header_idx = _find_header_row(df, sheet)
+    header = _header_index(df.row(header_idx))
+
+    missing = [h for h in REQUIRED_HEADERS if h not in header]
     if missing:
-        raise SpecError(f"sheet {sheet!r}: missing required columns {missing}")
+        raise SpecError(f"sheet {sheet!r}: header row missing columns {missing}")
 
-    renamed = df.rename(
-        {headers[h]: h for h in headers if h in REQUIRED_HEADERS + OPTIONAL_HEADERS}
-    )
-    keep = [h for h in REQUIRED_HEADERS + OPTIONAL_HEADERS if h in renamed.columns]
-    trimmed = renamed.select(keep)
+    pos_idx = header["position"]
+    desc_idx = header["description"]
+    len_idx = header["length"]
+    type_idx = header["type"]
+    nullable_idx = header.get("nullable")
+    parse_idx = header.get("parse")
 
     columns: list[Column] = []
-    for row in trimmed.iter_rows(named=True):
-        if row.get("name") in (None, "") and row.get("start") in (None, ""):
-            continue  # skip fully blank rows
-        columns.append(_row_to_column(row))
+    max_end = 0
+    for raw_offset in range(header_idx + 1, df.height):
+        row = df.row(raw_offset)
+        if all(c is None or _cell_str(c) == "" for c in row):
+            continue
+        # Footer rows (totals, signatures, etc.) often have non-numeric
+        # Position; skip them quietly so layouts can carry trailing notes.
+        try:
+            start = _cell_int(row[pos_idx], field="position")
+            length = _cell_int(row[len_idx], field="length")
+        except SpecError:
+            continue
+        max_end = max(max_end, start + length - 1)
+
+        description = _cell_str(row[desc_idx]).lower()
+        if description == _BLANK_FIELD:
+            continue
+
+        columns.append(
+            _row_to_column(
+                row,
+                pos_idx=pos_idx,
+                desc_idx=desc_idx,
+                len_idx=len_idx,
+                type_idx=type_idx,
+                nullable_idx=nullable_idx,
+                parse_idx=parse_idx,
+                sheet=sheet,
+                line_no=raw_offset + 1,
+            )
+        )
+
     if not columns:
-        raise SpecError(f"sheet {sheet!r}: no column rows found")
-    return tuple(columns)
+        raise SpecError(f"sheet {sheet!r}: no column rows found below header row {header_idx + 1}")
+    return tuple(columns), max_end
 
 
 def _derived_for(columns: tuple[Column, ...]) -> tuple[tuple[str, str], ...]:
@@ -150,29 +244,28 @@ def _derived_for(columns: tuple[Column, ...]) -> tuple[tuple[str, str], ...]:
 
 
 def read_workbook(workbook: Path, effective_from: str) -> dict[str, Spec]:
-    """Parse every known trade-type sheet into a Spec. Returns {trade_type: Spec}."""
+    """Parse the workbook into one Spec per trade type. Sheets map by position
+    (1 -> imports, 2 -> exports_us, 3 -> exports_nonus); names are ignored."""
     validate_period(effective_from)
     workbook = workbook.resolve()
     sha = file_sha256(workbook)
     imported_at = now_iso()
 
-    sheets = pl.read_excel(workbook, sheet_id=0)
+    sheets = pl.read_excel(workbook, sheet_id=0, has_header=False)
     if not isinstance(sheets, dict):
         raise SpecError("polars.read_excel did not return a sheet dict")
 
-    lowered = {name.lower(): name for name in sheets}
-    missing = [t for t in TRADE_TYPES if t not in lowered]
-    if missing:
+    sheet_items = list(sheets.items())
+    if len(sheet_items) < len(TRADE_TYPES):
         raise SpecError(
-            f"workbook {workbook.name} missing required sheets: {missing}; "
-            f"found {sorted(sheets.keys())}"
+            f"workbook {workbook.name} has {len(sheet_items)} sheet(s); "
+            f"need at least {len(TRADE_TYPES)} (one per trade type, in order: "
+            f"{list(TRADE_TYPES)})"
         )
 
     out: dict[str, Spec] = {}
-    for trade_type in TRADE_TYPES:
-        sheet_name = lowered[trade_type]
-        columns = _sheet_to_columns(sheets[sheet_name], sheet_name)
-        record_length = max(c.start + c.length - 1 for c in columns)
+    for trade_type, (sheet_name, df) in zip(TRADE_TYPES, sheet_items, strict=False):
+        columns, record_length = _sheet_to_layout(df, sheet_name)
         spec = Spec(
             trade_type=trade_type,
             version=effective_from,
