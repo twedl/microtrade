@@ -36,6 +36,7 @@ Key invariants:
 - Three separate datasets on disk (one per trade type). Each Hive-partitioned by `year=/month=/`.
 - Per-partition write is idempotent: YTD re-runs overwrite the current year's partitions cleanly.
 - Canonical per-dataset schema is the union of all committed specs for that trade type, stored at `output/<trade_type>/_dataset_schema.json`; partitions whose spec lacks a column write typed nulls.
+- **Never delete or drop any rows or columns when processing raw data.** If any column cannot be processed, raise an exception and fail the partition. If a single row cannot be processed, write the offending row (with filename, line number, and error) to a separate quality-issue log and continue processing the rest of the file.
 
 ## Conventions
 
