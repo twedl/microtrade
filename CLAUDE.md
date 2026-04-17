@@ -56,4 +56,6 @@ Core pipeline is feature-complete and covers every documented invariant:
 - `excel_spec.read_workbook` handles the real upstream layout: positional sheet→trade_type mapping, autodetected `Position | Description | Length | Type` header, skipped `Blank` filler rows, `Char`/`Num` dtype tokens (Num defaults to Int64);
 - reference YAML specs generated from `examples/microdata-layout.xls` ship under `src/microtrade/specs/`.
 
-Remaining: `validate-specs` and `inspect` CLI subcommands are still stubs (exit code 2). Consumers that hive-scan the dataset should use a `**/*.parquet` glob because `_dataset_schema.json` lives at the dataset root per CLAUDE.md's path.
+- `microtrade inspect PATH` dumps the resolved spec plus the first N rows of a raw zip (or plain FWF via `--type` / `--period`), with per-column `[start..end] dtype 'value'` annotation; `--raw` prints full lines unannotated.
+
+Remaining: `validate-specs` is still a stub (exit code 2). Consumers that hive-scan the dataset should use a `**/*.parquet` glob because `_dataset_schema.json` lives at the dataset root per CLAUDE.md's path.
