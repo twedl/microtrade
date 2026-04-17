@@ -87,7 +87,9 @@ def test_pipeline_ytd_processes_only_current_year(prepared_env) -> None:
             assert partition.exists()
         assert not (env["output"] / trade_type / "year=2023").exists()
 
-        df = pl.scan_parquet(env["output"] / trade_type, hive_partitioning=True).collect()
+        df = pl.scan_parquet(
+            env["output"] / trade_type / "**/*.parquet", hive_partitioning=True
+        ).collect()
         assert df.height == 2 * rows_per_month[trade_type]
         assert set(df["year"].unique().to_list()) == {2024}
         assert set(df["month"].unique().to_list()) == {1, 2}
@@ -156,14 +158,14 @@ def test_pipeline_type_filter_limits_work(prepared_env) -> None:
 def test_pipeline_records_failure_and_continues(prepared_env) -> None:
     env = prepared_env
 
-    # Corrupt one of the imports zips so that ingest will raise (garbage numeric).
+    # Corrupt one imports zip with a truncated (wrong-length) line - that's a
+    # structural error that still fails the whole partition, unlike row-level
+    # parse errors which are routed to the quality-issues log.
     target = env["input"] / "imports_202401.zip"
     target.unlink()
     spec = excel_spec.read_workbook(env["tmp"] / "schema_workbook.xlsx", "2020-01")["imports"]
     good = render_fwf_lines(spec, n_rows=3, seed=0)
-    col = {c.name: c for c in spec.columns}["value_usd"]
-    bad = good[0][: col.start - 1] + "ABCDEABCDEABCDE" + good[0][col.start - 1 + col.length :]
-    make_zip_input(target, [good[0], bad])
+    make_zip_input(target, [good[0], good[1][:-5]])
 
     summary = pipeline.run(_config(env))
     # 6 total (3 types x 2 months); exactly 1 failed; others complete.
@@ -172,7 +174,7 @@ def test_pipeline_records_failure_and_continues(prepared_env) -> None:
     failed = next(r for r in summary.results if r.status == "failed")
     assert failed.trade_type == "imports"
     assert failed.year == 2024 and failed.month == 1
-    assert "cannot parse" in (failed.error or "")
+    assert "record_length" in (failed.error or "")
 
     # Failure is recorded in the manifest.
     manifest = next((env["output"] / "_manifests" / "imports").glob("*.jsonl")).read_text(
@@ -182,6 +184,53 @@ def test_pipeline_records_failure_and_continues(prepared_env) -> None:
     statuses = {(r["year"], r["month"]): r["status"] for r in records}
     assert statuses[(2024, 1)] == "failed"
     assert statuses[(2024, 2)] == "ok"
+
+
+def test_pipeline_row_level_error_logged_to_quality_issues(prepared_env) -> None:
+    """A bad numeric row is skipped, logged to the quality-issues JSONL, and the
+    partition still writes successfully for the remaining rows."""
+    env = prepared_env
+
+    target = env["input"] / "imports_202401.zip"
+    target.unlink()
+    spec = excel_spec.read_workbook(env["tmp"] / "schema_workbook.xlsx", "2020-01")["imports"]
+    good = render_fwf_lines(spec, n_rows=3, seed=0)
+    col = {c.name: c for c in spec.columns}["value_usd"]
+    bad_line = good[0][: col.start - 1] + "ABCDEABCDEABCDE" + good[0][col.start - 1 + col.length :]
+    make_zip_input(target, [good[0], bad_line, good[1]])
+
+    summary = pipeline.run(_config(env))
+    assert summary.failed_count == 0
+    partition = next(
+        r for r in summary.results if r.trade_type == "imports" and (r.year, r.month) == (2024, 1)
+    )
+    assert partition.status == "ok"
+    assert partition.rows_written == 2
+    assert partition.rows_skipped == 1
+
+    issues_file = env["output"] / "_quality_issues" / "imports" / f"{summary.run_id}.jsonl"
+    assert issues_file.exists()
+    records = [json.loads(line) for line in issues_file.read_text().strip().splitlines()]
+    assert len(records) == 1
+    assert records[0]["column"] == "value_usd"
+    assert records[0]["line_no"] == 2
+    assert "cannot parse" in records[0]["error"]
+
+
+def test_pipeline_writes_canonical_dataset_schema(prepared_env) -> None:
+    env = prepared_env
+    pipeline.run(_config(env))
+
+    for trade_type in schema.TRADE_TYPES:
+        schema_path = env["output"] / trade_type / "_dataset_schema.json"
+        assert schema_path.exists()
+        payload = json.loads(schema_path.read_text())
+        assert payload["trade_type"] == trade_type
+        assert payload["spec_versions"] == ["2020-01"]
+        names = [c["name"] for c in payload["columns"]]
+        # Spec-defined columns present; partition keys not mixed in.
+        assert "period" in names
+        assert "year" not in names and "month" not in names
 
 
 def test_pipeline_missing_spec_is_recorded_as_failure(tmp_path: Path) -> None:
@@ -236,7 +285,11 @@ def test_cli_ingest_end_to_end(prepared_env) -> None:
     assert "6 ok, 0 failed" in result.output
 
     # Round-trip via polars to confirm the dataset is readable end-to-end.
-    df = pl.scan_parquet(env["output"] / "imports", hive_partitioning=True).collect()
+    # The glob filters out the sibling `_dataset_schema.json` that the pipeline
+    # also writes at the trade-type root.
+    df = pl.scan_parquet(
+        env["output"] / "imports" / "**/*.parquet", hive_partitioning=True
+    ).collect()
     assert df.height > 0
     assert {"year", "month"}.issubset(df.columns)
 

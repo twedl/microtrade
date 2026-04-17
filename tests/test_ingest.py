@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 import pyarrow as pa
@@ -11,9 +12,11 @@ from microtrade.discover import RawInput
 from microtrade.excel_spec import read_workbook
 from microtrade.ingest import (
     IngestError,
+    QualityIssue,
     build_arrow_schema,
     iter_record_batches,
 )
+from microtrade.schema import Column, Spec
 from tests._helpers import make_zip_input, render_fwf_lines
 
 
@@ -147,3 +150,65 @@ def test_ingest_rejects_period_before_effective_from(imports_spec, tmp_path: Pat
 
     with pytest.raises(IngestError, match="does not apply"):
         list(iter_record_batches(raw, imports_spec, chunk_rows=100))
+
+
+def test_ingest_date_column_parses_yyyymmdd(tmp_path: Path) -> None:
+    spec = Spec(
+        trade_type="imports",
+        version="2024-01",
+        effective_from="2024-01",
+        record_length=13,
+        columns=(
+            Column(name="ref", start=1, length=5, dtype="Utf8", nullable=False),
+            Column(
+                name="entry_date",
+                start=6,
+                length=8,
+                dtype="Date",
+                nullable=False,
+                parse="yyyymmdd_to_date",
+            ),
+        ),
+    )
+    line1 = "AAAAA" + "20240115"
+    line2 = "BBBBB" + "20240229"
+    raw = _raw_input(tmp_path, [line1, line2])
+
+    (batch,) = list(iter_record_batches(raw, spec, chunk_rows=100))
+    assert batch.schema.field("entry_date").type == pa.date32()
+    assert batch.column("entry_date").to_pylist() == [date(2024, 1, 15), date(2024, 2, 29)]
+
+
+def test_ingest_sink_captures_bad_row_and_continues(imports_spec, tmp_path: Path) -> None:
+    good = render_fwf_lines(imports_spec, n_rows=3, seed=0)
+    col = {c.name: c for c in imports_spec.columns}["value_usd"]
+    bad = good[0][: col.start - 1] + "ABCDEABCDEABCDE" + good[0][col.start - 1 + col.length :]
+    raw = _raw_input(tmp_path, [good[0], bad, good[1]])
+
+    captured: list[QualityIssue] = []
+    (batch,) = list(
+        iter_record_batches(raw, imports_spec, chunk_rows=100, on_quality_issue=captured.append)
+    )
+    assert batch.num_rows == 2
+    assert len(captured) == 1
+    issue = captured[0]
+    assert issue.line_no == 2
+    assert issue.column == "value_usd"
+    assert "cannot parse" in issue.error
+    assert issue.file == raw.path.name
+
+
+def test_ingest_sink_captures_blank_non_nullable(imports_spec, tmp_path: Path) -> None:
+    good = render_fwf_lines(imports_spec, n_rows=1, seed=0)[0]
+    col = {c.name: c for c in imports_spec.columns}["value_usd"]
+    blanked = good[: col.start - 1] + (" " * col.length) + good[col.start - 1 + col.length :]
+    raw = _raw_input(tmp_path, [blanked, good])
+
+    captured: list[QualityIssue] = []
+    (batch,) = list(
+        iter_record_batches(raw, imports_spec, chunk_rows=100, on_quality_issue=captured.append)
+    )
+    assert batch.num_rows == 1
+    assert len(captured) == 1
+    assert captured[0].column == "value_usd"
+    assert "non-nullable" in captured[0].error
