@@ -17,6 +17,9 @@ def test_normalize_dtype_handles_common_aliases() -> None:
     assert normalize_dtype(" INT ") == "Int64"
     assert normalize_dtype("float64") == "Float64"
     assert normalize_dtype("date") == "Date"
+    # Real-workbook tokens.
+    assert normalize_dtype("Char") == "Utf8"
+    assert normalize_dtype("Num") == "Int64"
 
 
 def test_normalize_dtype_rejects_unknown() -> None:
@@ -42,7 +45,8 @@ def test_read_workbook_produces_spec_per_trade_type(schema_workbook: Path) -> No
     ]
     assert imports.source is not None
     assert imports.source.workbook == schema_workbook.name
-    assert imports.source.sheet == "imports"
+    # Sheets map positionally now; the synthetic builder uses `SHEET001` etc.
+    assert imports.source.sheet == "SHEET001"
     assert imports.derived == (("year", "year(period)"), ("month", "month(period)"))
 
     exports_nonus = specs["exports_nonus"]
@@ -54,19 +58,44 @@ def test_read_workbook_rejects_invalid_period(schema_workbook: Path) -> None:
         read_workbook(schema_workbook, "2024/01")
 
 
-def test_read_workbook_rejects_missing_sheet(tmp_path: Path) -> None:
+def test_read_workbook_rejects_too_few_sheets(tmp_path: Path) -> None:
     from openpyxl import Workbook
 
     wb = Workbook()
     wb.remove(wb.active)
-    ws = wb.create_sheet("imports")
-    ws.append(["name", "start", "length", "dtype", "nullable"])
-    ws.append(["a", 1, 5, "string", "n"])
+    ws = wb.create_sheet("only_one")
+    ws.append(["Position", "Description", "Length", "Type"])
+    ws.append([1, "a", 5, "Char"])
     path = tmp_path / "wb.xlsx"
     wb.save(path)
 
-    with pytest.raises(SpecError, match="missing required sheets"):
+    with pytest.raises(SpecError, match="need at least"):
         read_workbook(path, "2024-01")
+
+
+def test_read_workbook_skips_blank_filler_rows(tmp_path: Path) -> None:
+    """`Blank` rows are FWF padding bytes - they do not become columns, but
+    they extend `record_length` so it matches the actual line width."""
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    wb.remove(wb.active)
+    for sheet_idx, name in enumerate(("imports", "exports_us", "exports_nonus"), start=1):
+        ws = wb.create_sheet(f"SHEET{sheet_idx:03d}")
+        ws.append([f"layout {name}", None, None, None])
+        ws.append(["Position", "Description", "Length", "Type"])
+        ws.append([1, "code", 5, "Char"])
+        ws.append([6, "Blank", 1, "Char"])  # filler
+        ws.append([7, "value", 10, "Num"])
+        ws.append([17, "Blank", 3, "Char"])  # trailing filler extends record_length
+    path = tmp_path / "wb.xlsx"
+    wb.save(path)
+
+    specs = read_workbook(path, "2024-01")
+    imports = specs["imports"]
+    assert [c.name for c in imports.columns] == ["code", "value"]
+    assert [c.dtype for c in imports.columns] == ["Utf8", "Int64"]
+    assert imports.record_length == 19  # trailing Blank pushes it past `value`'s end (16)
 
 
 def test_import_spec_cli_writes_yaml(schema_workbook: Path, tmp_path: Path) -> None:

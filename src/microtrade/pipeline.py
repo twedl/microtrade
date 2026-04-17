@@ -9,6 +9,13 @@ walk the tree without tripping on non-parquet files).
 
 A partition-level failure is recorded in the manifest and the run continues
 with the remaining inputs, so one corrupt month does not block the others.
+Row-level parse failures (bad numeric, blank non-nullable, bad date) are
+appended to `<output_dir>/_quality_issues/<trade_type>/<run_id>.jsonl` and the
+row is skipped; the surrounding partition still writes successfully.
+
+At the end of a run each processed trade type also gets its canonical
+`_dataset_schema.json` refreshed at `<output_dir>/<trade_type>/_dataset_schema.json`,
+capturing the union of every committed spec's columns for that trade type.
 Callers decide what to do with failures via the returned `RunSummary`.
 """
 
@@ -16,24 +23,33 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from types import TracebackType
+from typing import Any, Literal, TextIO
 
 from microtrade import discover
 from microtrade.discover import RawInput
-from microtrade.ingest import DEFAULT_CHUNK_ROWS, build_arrow_schema, iter_record_batches
+from microtrade.ingest import (
+    DEFAULT_CHUNK_ROWS,
+    IngestError,
+    QualityIssue,
+    build_arrow_schema,
+    iter_record_batches,
+)
 from microtrade.schema import (
     TRADE_TYPES,
+    CanonicalColumn,
     Spec,
     SpecError,
+    canonical_columns,
     file_sha256,
     load_all,
     now_iso,
     resolve,
 )
-from microtrade.write import PartitionWriter
+from microtrade.write import PartitionWriter, WriteError
 
 Status = Literal["ok", "failed"]
 STATUS_OK: Status = "ok"
@@ -67,6 +83,7 @@ class PartitionResult:
     input_sha256: str
     spec_version: str | None
     rows_written: int
+    rows_skipped: int
     duration_seconds: float
     output_path: str
     status: Status
@@ -85,6 +102,10 @@ class RunSummary:
         return sum(r.rows_written for r in self.results)
 
     @property
+    def total_skipped(self) -> int:
+        return sum(r.rows_skipped for r in self.results)
+
+    @property
     def ok_count(self) -> int:
         return sum(1 for r in self.results if r.status == STATUS_OK)
 
@@ -101,15 +122,23 @@ def run(config: PipelineConfig) -> RunSummary:
 
     results: list[PartitionResult] = []
     manifest_paths: dict[str, Path] = {}
+    trade_types_seen: set[str] = set()
 
     for raw in raw_inputs:
-        result = _process_one(raw, config, run_id=run_id, started_at=started_at)
+        result = _process_one(raw, config, run_id=run_id)
         results.append(result)
+        trade_types_seen.add(raw.trade_type)
 
         manifest_path = manifest_paths.setdefault(
             raw.trade_type, _manifest_path(config.output_dir, raw.trade_type, run_id)
         )
         _append_manifest(manifest_path, result, run_id=run_id, started_at=started_at)
+
+    # Refresh the canonical dataset schema for every trade type we touched
+    # (or was configured), so consumers of `output/<type>/_dataset_schema.json`
+    # always see the union of committed specs after a run.
+    for trade_type in sorted(set(config.trade_types) | trade_types_seen):
+        _write_dataset_schema(config.output_dir, config.spec_dir, trade_type)
 
     return RunSummary(
         run_id=run_id,
@@ -141,7 +170,6 @@ def _process_one(
     config: PipelineConfig,
     *,
     run_id: str,
-    started_at: str,
 ) -> PartitionResult:
     start = time.perf_counter()
     input_sha = _sha256_or_empty(raw.path)
@@ -151,6 +179,7 @@ def _process_one(
     except (SpecError, FileNotFoundError) as exc:
         return _failure_result(raw, start, input_sha, spec_version=None, output_path="", error=exc)
 
+    quality_path = _quality_issues_path(config.output_dir, raw.trade_type, run_id)
     writer = PartitionWriter(
         dataset_root=config.output_dir,
         trade_type=raw.trade_type,
@@ -159,35 +188,42 @@ def _process_one(
         arrow_schema=build_arrow_schema(spec),
         compression=config.compression,
     )
-    try:
-        with writer as w:
-            for batch in iter_record_batches(
-                raw, spec, chunk_rows=config.chunk_rows, encoding=config.encoding
-            ):
-                w.write_batch(batch)
-            rows_written = w.rows_written
-    except Exception as exc:
-        return _failure_result(
-            raw,
-            start,
-            input_sha,
-            spec_version=spec.version,
-            output_path=str(writer.final_path),
-            error=exc,
-        )
+    with _QualityIssueWriter(path=quality_path, run_id=run_id, raw=raw) as issue_sink:
+        try:
+            with writer as w:
+                for batch in iter_record_batches(
+                    raw,
+                    spec,
+                    chunk_rows=config.chunk_rows,
+                    encoding=config.encoding,
+                    on_quality_issue=issue_sink,
+                ):
+                    w.write_batch(batch)
+                rows_written = w.rows_written
+        except (IngestError, WriteError, OSError, ValueError) as exc:
+            return _failure_result(
+                raw,
+                start,
+                input_sha,
+                spec_version=spec.version,
+                output_path=str(writer.final_path),
+                error=exc,
+                rows_skipped=issue_sink.count,
+            )
 
-    return PartitionResult(
-        trade_type=raw.trade_type,
-        year=raw.year,
-        month=raw.month,
-        input_path=str(raw.path),
-        input_sha256=input_sha,
-        spec_version=spec.version,
-        rows_written=rows_written,
-        duration_seconds=time.perf_counter() - start,
-        output_path=str(writer.final_path),
-        status=STATUS_OK,
-    )
+        return PartitionResult(
+            trade_type=raw.trade_type,
+            year=raw.year,
+            month=raw.month,
+            input_path=str(raw.path),
+            input_sha256=input_sha,
+            spec_version=spec.version,
+            rows_written=rows_written,
+            rows_skipped=issue_sink.count,
+            duration_seconds=time.perf_counter() - start,
+            output_path=str(writer.final_path),
+            status=STATUS_OK,
+        )
 
 
 def _failure_result(
@@ -198,6 +234,7 @@ def _failure_result(
     spec_version: str | None,
     output_path: str,
     error: BaseException,
+    rows_skipped: int = 0,
 ) -> PartitionResult:
     return PartitionResult(
         trade_type=raw.trade_type,
@@ -207,6 +244,7 @@ def _failure_result(
         input_sha256=input_sha,
         spec_version=spec_version,
         rows_written=0,
+        rows_skipped=rows_skipped,
         duration_seconds=time.perf_counter() - start,
         output_path=output_path,
         status=STATUS_FAILED,
@@ -227,27 +265,107 @@ def _manifest_path(output_dir: Path, trade_type: str, run_id: str) -> Path:
     return path
 
 
+def _quality_issues_path(output_dir: Path, trade_type: str, run_id: str) -> Path:
+    return output_dir / "_quality_issues" / trade_type / f"{run_id}.jsonl"
+
+
+def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, sort_keys=True) + "\n")
+
+
 def _append_manifest(
     manifest_path: Path, result: PartitionResult, *, run_id: str, started_at: str
 ) -> None:
-    record = {
-        "run_id": run_id,
-        "started_at": started_at,
-        "logged_at": now_iso(),
-        "trade_type": result.trade_type,
-        "year": result.year,
-        "month": result.month,
-        "input_path": result.input_path,
-        "input_sha256": result.input_sha256,
-        "spec_version": result.spec_version,
-        "rows_written": result.rows_written,
-        "duration_seconds": round(result.duration_seconds, 4),
-        "output_path": result.output_path,
-        "status": result.status,
-        "error": result.error,
+    _append_jsonl(
+        manifest_path,
+        {
+            "run_id": run_id,
+            "started_at": started_at,
+            "logged_at": now_iso(),
+            "trade_type": result.trade_type,
+            "year": result.year,
+            "month": result.month,
+            "input_path": result.input_path,
+            "input_sha256": result.input_sha256,
+            "spec_version": result.spec_version,
+            "rows_written": result.rows_written,
+            "rows_skipped": result.rows_skipped,
+            "duration_seconds": round(result.duration_seconds, 4),
+            "output_path": result.output_path,
+            "status": result.status,
+            "error": result.error,
+        },
+    )
+
+
+def _write_dataset_schema(output_dir: Path, spec_dir: Path, trade_type: str) -> None:
+    try:
+        specs = load_all(spec_dir, trade_type)
+    except SpecError:
+        return
+    if not specs:
+        return
+    cols: tuple[CanonicalColumn, ...] = canonical_columns(specs)
+    target = output_dir / trade_type / "_dataset_schema.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "trade_type": trade_type,
+        "generated_at": now_iso(),
+        "spec_versions": [s.effective_from for s in specs],
+        "columns": [asdict(c) for c in cols],
     }
-    with manifest_path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, sort_keys=True) + "\n")
+    target.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+
+
+class _QualityIssueWriter:
+    """Context-managed JSONL sink for per-row parse failures.
+
+    Holds one open file handle across the partition so high-volume error
+    streams don't pay open/close syscalls per row; creates the parent
+    directory on first write. `.count` is exposed so the pipeline can record
+    `rows_skipped` without a separate counter object.
+    """
+
+    def __init__(self, *, path: Path, run_id: str, raw: RawInput) -> None:
+        self._path = path
+        self._run_id = run_id
+        self._raw = raw
+        self._file: TextIO | None = None
+        self.count: int = 0
+
+    def __enter__(self) -> _QualityIssueWriter:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        if self._file is not None:
+            self._file.close()
+            self._file = None
+
+    def __call__(self, issue: QualityIssue) -> None:
+        if self._file is None:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._file = self._path.open("a", encoding="utf-8")
+        record = {
+            "run_id": self._run_id,
+            "trade_type": self._raw.trade_type,
+            "year": self._raw.year,
+            "month": self._raw.month,
+            "input_path": str(self._raw.path),
+            "file": issue.file,
+            "line_no": issue.line_no,
+            "column": issue.column,
+            "error": issue.error,
+            "raw_line": issue.raw_line,
+            "logged_at": now_iso(),
+        }
+        self._file.write(json.dumps(record, sort_keys=True) + "\n")
+        self.count += 1
 
 
 def _sha256_or_empty(path: Path) -> str:

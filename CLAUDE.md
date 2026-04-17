@@ -47,4 +47,13 @@ Key invariants:
 
 ## Current build state
 
-Phases 1-4 are landed: scaffolding, Excel→YAML converter + `import-spec` CLI, `discover`/`ingest`/`write` (streaming FWF → atomic Parquet), and `pipeline.run` + `microtrade ingest` CLI with per-run JSONL manifests. Remaining: `validate-specs` and `inspect` CLI commands (currently stubbed), importing real workbook specs into `src/microtrade/specs/`, and a final README pass. See `/root/.claude/plans/work-back-and-forth-radiant-goose.md` for the full plan.
+Core pipeline is feature-complete and covers every documented invariant:
+
+- scaffolding, Excel→YAML converter + `import-spec` CLI, `discover`/`ingest`/`write` (streaming FWF → atomic Parquet), and `pipeline.run` + `microtrade ingest` CLI with per-run JSONL manifests;
+- Date dtype (pyarrow `date32`) with `yyyymmdd_to_date` / `yyyymm_to_date` parsers;
+- row-level parse failures logged to `<output>/_quality_issues/<trade_type>/<run_id>.jsonl` and skipped, while the surrounding partition still writes;
+- canonical per-dataset schema refreshed at `<output>/<trade_type>/_dataset_schema.json` (union of every committed spec, latest dtype wins, nullability widens);
+- `excel_spec.read_workbook` handles the real upstream layout: positional sheet→trade_type mapping, autodetected `Position | Description | Length | Type` header, skipped `Blank` filler rows, `Char`/`Num` dtype tokens (Num defaults to Int64);
+- reference YAML specs generated from `examples/microdata-layout.xls` ship under `src/microtrade/specs/`.
+
+Remaining: `validate-specs` and `inspect` CLI subcommands are still stubs (exit code 2). Consumers that hive-scan the dataset should use a `**/*.parquet` glob because `_dataset_schema.json` lives at the dataset root per CLAUDE.md's path.
