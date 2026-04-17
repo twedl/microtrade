@@ -73,15 +73,24 @@ DEFAULT_SHEETS: tuple[SheetSpec, ...] = (
 
 
 def build_workbook(path: Path, sheets: tuple[SheetSpec, ...] = DEFAULT_SHEETS) -> Path:
-    """Write a synthetic schema workbook with one sheet per trade type."""
+    """Write a synthetic schema workbook in the real upstream layout.
+
+    Sheets are positional (`SHEET001`, `SHEET002`, ...): the spec parser maps
+    sheet index -> trade_type, ignoring names. Each sheet carries a few
+    preamble rows (so we exercise the parser's header autodetection) and a
+    `Position | Description | Length | Type | Nullable | Parse` table.
+    """
     wb = Workbook()
     wb.remove(wb.active)  # drop the default sheet openpyxl creates
-    for sheet in sheets:
-        ws = wb.create_sheet(title=sheet.trade_type)
-        ws.append(list(SHEET_HEADER))
+    for idx, sheet in enumerate(sheets, start=1):
+        ws = wb.create_sheet(title=f"SHEET{idx:03d}")
+        ws.append([f"Synthetic layout for {sheet.trade_type}", None, None, None, None, None])
+        ws.append(["CONFIDENTIAL", None, None, None, None, None])
+        ws.append([None, None, None, None, None, None])
+        ws.append(["Position", "Description", "Length", "Type", "Nullable", "Parse"])
         for row in sheet.rows:
-            name, start, length, dtype, nullable, description, parse = row
-            ws.append([name, start, length, dtype, "y" if nullable else "n", description, parse])
+            name, start, length, dtype, nullable, _description, parse = row
+            ws.append([start, name, length, dtype, "y" if nullable else "n", parse])
     path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(path)
     return path
