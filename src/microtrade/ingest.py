@@ -18,7 +18,7 @@ import io
 import zipfile
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import IO
 
@@ -139,9 +139,15 @@ def _stream_lines(
     on_quality_issue: QualityIssueSink | None,
 ) -> Iterator[pa.RecordBatch]:
     text = io.TextIOWrapper(binstream, encoding=encoding, newline="")
-    # Precompute field slice bounds once so the per-row loop is pure indexing.
+    # Precompute slices and per-column parser closures once per stream so the
+    # per-row loop does a single indirect call + no dtype branching.
+    n = len(columns_ordered)
     slices = [slice(c.start - 1, c.start - 1 + c.length) for c in columns_ordered]
-    buffers: list[list[object]] = [[] for _ in columns_ordered]
+    parsers = [_make_parser(c) for c in columns_ordered]
+    col_names = [c.name for c in columns_ordered]
+    field_types = [arrow_schema.field(i).type for i in range(n)]
+
+    buffers: list[list[object]] = [[] for _ in range(n)]
     rows_in_batch = 0
 
     for line_no, raw_line in enumerate(text, start=1):
@@ -152,7 +158,17 @@ def _stream_lines(
                 f"{spec.record_length}, got {len(line)}"
             )
 
-        row_values, bad_column, bad_error = _parse_row(line, columns_ordered, slices)
+        row_values: list[object] = [None] * n
+        bad_column: str | None = None
+        bad_error: _CastError | None = None
+        for i in range(n):
+            try:
+                row_values[i] = parsers[i](line[slices[i]])
+            except _CastError as exc:
+                bad_column = col_names[i]
+                bad_error = exc
+                break
+
         if bad_error is not None:
             if on_quality_issue is None:
                 raise IngestError(_row_msg(raw, line_no, bad_column, str(bad_error)))
@@ -172,69 +188,96 @@ def _stream_lines(
         rows_in_batch += 1
 
         if rows_in_batch >= chunk_rows:
-            yield _build_batch(buffers, arrow_schema)
-            buffers = [[] for _ in columns_ordered]
+            yield _build_batch(buffers, arrow_schema, field_types)
+            buffers = [[] for _ in range(n)]
             rows_in_batch = 0
 
     if rows_in_batch > 0:
-        yield _build_batch(buffers, arrow_schema)
+        yield _build_batch(buffers, arrow_schema, field_types)
 
 
-def _parse_row(
-    line: str, columns_ordered: list[Column], slices: list[slice]
-) -> tuple[list[object], str | None, _CastError | None]:
-    values: list[object] = []
-    for col, sl in zip(columns_ordered, slices, strict=True):
-        try:
-            values.append(_parse_value(line[sl], col))
-        except _CastError as exc:
-            return values, col.name, exc
-    return values, None, None
+def _make_parser(col: Column) -> Callable[[str], object]:
+    """Return a closure that casts a single FWF substring to `col`'s dtype.
 
+    All dtype-specific branching happens here, once per column, rather than on
+    every value during streaming. Closures raise `_CastError` on failure; the
+    caller decides whether to log-and-skip or re-raise as `IngestError`.
+    """
+    nullable = col.nullable
 
-def _parse_value(raw_value: str, col: Column) -> object:
     if col.dtype == "Utf8":
-        v_clean = raw_value.rstrip()
-        if not v_clean:
-            if not col.nullable:
-                raise _CastError("blank value in non-nullable column")
-            return None
-        return v_clean
 
-    v_clean = raw_value.strip()
-    if not v_clean:
-        if not col.nullable:
-            raise _CastError(f"blank value in non-nullable {col.dtype} column")
-        return None
+        def parse_utf8(raw_value: str) -> object:
+            v = raw_value.rstrip()
+            if not v:
+                if not nullable:
+                    raise _CastError("blank value in non-nullable column")
+                return None
+            return v
+
+        return parse_utf8
 
     if col.dtype == "Int64":
-        try:
-            return int(v_clean)
-        except ValueError as exc:
-            raise _CastError(f"cannot parse {v_clean!r} as Int64") from exc
+
+        def parse_int(raw_value: str) -> object:
+            v = raw_value.strip()
+            if not v:
+                if not nullable:
+                    raise _CastError("blank value in non-nullable Int64 column")
+                return None
+            try:
+                return int(v)
+            except ValueError as exc:
+                raise _CastError(f"cannot parse {v!r} as Int64") from exc
+
+        return parse_int
+
     if col.dtype == "Float64":
-        try:
-            return float(v_clean)
-        except ValueError as exc:
-            raise _CastError(f"cannot parse {v_clean!r} as Float64") from exc
+
+        def parse_float(raw_value: str) -> object:
+            v = raw_value.strip()
+            if not v:
+                if not nullable:
+                    raise _CastError("blank value in non-nullable Float64 column")
+                return None
+            try:
+                return float(v)
+            except ValueError as exc:
+                raise _CastError(f"cannot parse {v!r} as Float64") from exc
+
+        return parse_float
+
     if col.dtype == "Date":
-        return _parse_date(v_clean, col)
-    raise _CastError(f"unsupported dtype {col.dtype!r}")
+        parse_name = col.parse or "yyyymmdd_to_date"
+        fmt = _DATE_FORMATS.get(parse_name)
+        if fmt is None:
+            raise IngestError(
+                f"column {col.name!r}: unknown Date parse {parse_name!r}; "
+                f"known: {sorted(_DATE_FORMATS)}"
+            )
+
+        def parse_date(raw_value: str) -> object:
+            v = raw_value.strip()
+            if not v:
+                if not nullable:
+                    raise _CastError("blank value in non-nullable Date column")
+                return None
+            try:
+                return datetime.strptime(v, fmt).date()
+            except ValueError as exc:
+                raise _CastError(f"cannot parse {v!r} as Date ({parse_name})") from exc
+
+        return parse_date
+
+    raise IngestError(f"column {col.name!r}: unsupported dtype {col.dtype!r}")
 
 
-def _parse_date(v_clean: str, col: Column) -> date:
-    parse = col.parse or "yyyymmdd_to_date"
-    fmt = _DATE_FORMATS.get(parse)
-    if fmt is None:
-        raise _CastError(f"unknown parse {parse!r} for Date column")
-    try:
-        return datetime.strptime(v_clean, fmt).date()
-    except ValueError as exc:
-        raise _CastError(f"cannot parse {v_clean!r} as Date ({parse})") from exc
-
-
-def _build_batch(buffers: list[list[object]], arrow_schema: pa.Schema) -> pa.RecordBatch:
-    arrays = [pa.array(buf, type=arrow_schema.field(i).type) for i, buf in enumerate(buffers)]
+def _build_batch(
+    buffers: list[list[object]],
+    arrow_schema: pa.Schema,
+    field_types: list[pa.DataType],
+) -> pa.RecordBatch:
+    arrays = [pa.array(buf, type=field_types[i]) for i, buf in enumerate(buffers)]
     return pa.record_batch(arrays, schema=arrow_schema)
 
 

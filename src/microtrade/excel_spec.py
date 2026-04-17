@@ -26,6 +26,7 @@ never on the ingest hot path.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -140,31 +141,46 @@ def _header_index(row: tuple[Any, ...]) -> dict[str, int]:
     return out
 
 
-def _row_to_column(
-    row: tuple[Any, ...],
-    *,
-    pos_idx: int,
-    desc_idx: int,
-    len_idx: int,
-    type_idx: int,
-    nullable_idx: int | None,
-    parse_idx: int | None,
-    sheet: str,
-    line_no: int,
-) -> Column:
+@dataclass(frozen=True)
+class _ColumnIndex:
+    """Resolved column positions for one sheet's header row."""
+
+    position: int
+    description: int
+    length: int
+    type_: int
+    nullable: int | None
+    parse: int | None
+
+    @classmethod
+    def from_header(cls, header: dict[str, int], sheet: str) -> _ColumnIndex:
+        missing = [h for h in REQUIRED_HEADERS if h not in header]
+        if missing:
+            raise SpecError(f"sheet {sheet!r}: header row missing columns {missing}")
+        return cls(
+            position=header["position"],
+            description=header["description"],
+            length=header["length"],
+            type_=header["type"],
+            nullable=header.get("nullable"),
+            parse=header.get("parse"),
+        )
+
+
+def _row_to_column(row: tuple[Any, ...], idx: _ColumnIndex, *, sheet: str, line_no: int) -> Column:
     where = f"sheet {sheet!r} row {line_no}"
-    start = _cell_int(row[pos_idx], field=f"{where} Position")
-    length = _cell_int(row[len_idx], field=f"{where} Length")
-    name = _cell_str(row[desc_idx])
+    start = _cell_int(row[idx.position], field=f"{where} Position")
+    length = _cell_int(row[idx.length], field=f"{where} Length")
+    name = _cell_str(row[idx.description])
     if not name:
         raise SpecError(f"{where}: Description is empty")
-    dtype = normalize_dtype(_cell_str(row[type_idx]) or "")
+    dtype = normalize_dtype(_cell_str(row[idx.type_]) or "")
     nullable = (
-        _coerce_bool(row[nullable_idx])
-        if nullable_idx is not None and row[nullable_idx] is not None
+        _coerce_bool(row[idx.nullable])
+        if idx.nullable is not None and row[idx.nullable] is not None
         else True
     )
-    parse_raw = row[parse_idx] if parse_idx is not None else None
+    parse_raw = row[idx.parse] if idx.parse is not None else None
     parse = _cell_str(parse_raw) if parse_raw not in (None, "") else _PARSE_FOR_DTYPE.get(dtype)
     return Column(
         name=name,
@@ -185,18 +201,7 @@ def _sheet_to_layout(df: pl.DataFrame, sheet: str) -> tuple[tuple[Column, ...], 
     FWF line length even when filler trails the last real column.
     """
     header_idx = _find_header_row(df, sheet)
-    header = _header_index(df.row(header_idx))
-
-    missing = [h for h in REQUIRED_HEADERS if h not in header]
-    if missing:
-        raise SpecError(f"sheet {sheet!r}: header row missing columns {missing}")
-
-    pos_idx = header["position"]
-    desc_idx = header["description"]
-    len_idx = header["length"]
-    type_idx = header["type"]
-    nullable_idx = header.get("nullable")
-    parse_idx = header.get("parse")
+    idx = _ColumnIndex.from_header(_header_index(df.row(header_idx)), sheet)
 
     columns: list[Column] = []
     max_end = 0
@@ -207,29 +212,16 @@ def _sheet_to_layout(df: pl.DataFrame, sheet: str) -> tuple[tuple[Column, ...], 
         # Footer rows (totals, signatures, etc.) often have non-numeric
         # Position; skip them quietly so layouts can carry trailing notes.
         try:
-            start = _cell_int(row[pos_idx], field="position")
-            length = _cell_int(row[len_idx], field="length")
+            start = _cell_int(row[idx.position], field="position")
+            length = _cell_int(row[idx.length], field="length")
         except SpecError:
             continue
         max_end = max(max_end, start + length - 1)
 
-        description = _cell_str(row[desc_idx]).lower()
-        if description == _BLANK_FIELD:
+        if _cell_str(row[idx.description]).lower() == _BLANK_FIELD:
             continue
 
-        columns.append(
-            _row_to_column(
-                row,
-                pos_idx=pos_idx,
-                desc_idx=desc_idx,
-                len_idx=len_idx,
-                type_idx=type_idx,
-                nullable_idx=nullable_idx,
-                parse_idx=parse_idx,
-                sheet=sheet,
-                line_no=raw_offset + 1,
-            )
-        )
+        columns.append(_row_to_column(row, idx, sheet=sheet, line_no=raw_offset + 1))
 
     if not columns:
         raise SpecError(f"sheet {sheet!r}: no column rows found below header row {header_idx + 1}")
