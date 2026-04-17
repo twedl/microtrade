@@ -4,7 +4,7 @@ Commands:
     version        - print the installed microtrade version
     ingest         - process zipped FWF inputs into Hive-partitioned Parquet
     import-spec    - convert an Excel schema workbook into versioned YAML specs
-    validate-specs - lint YAML specs and print a changelog across versions (stub)
+    validate-specs - lint YAML specs and print a changelog across versions
     inspect        - dump the resolved spec and first rows of a raw file
 """
 
@@ -137,8 +137,70 @@ def import_spec(
 def validate_specs(
     spec_dir: Path = typer.Option(DEFAULT_SPEC_DIR, "--spec-dir", exists=True, file_okay=False),
 ) -> None:
-    """Lint YAML specs and print a changelog across versions (stub)."""
-    _not_implemented("validate-specs", spec_dir=spec_dir)
+    """Lint YAML specs and print a per-trade-type changelog across versions.
+
+    Exits 0 when every spec loads cleanly, filenames match `effective_from`,
+    and `canonical_columns` succeeds per trade type. Exits 1 on any problem
+    (a pointer to the offending file is printed to stderr).
+    """
+    problems: list[str] = []
+    any_specs = False
+
+    for trade_type in schema.TRADE_TYPES:
+        trade_dir = spec_dir / trade_type
+        yaml_files = sorted(trade_dir.glob("v*.yaml")) if trade_dir.is_dir() else []
+        if not yaml_files:
+            typer.echo(f"{trade_type}: no specs")
+            continue
+        any_specs = True
+
+        specs: list[schema.Spec] = []
+        for yaml_path in yaml_files:
+            expected_version = yaml_path.stem.removeprefix("v")
+            try:
+                spec = schema.load_spec(yaml_path)
+            except schema.SpecError as exc:
+                problems.append(f"{yaml_path}: {exc}")
+                continue
+            if spec.effective_from != expected_version:
+                problems.append(
+                    f"{yaml_path}: filename version {expected_version!r} does not match "
+                    f"effective_from {spec.effective_from!r}"
+                )
+                continue
+            specs.append(spec)
+
+        if not specs:
+            continue
+
+        specs.sort(key=lambda s: s.effective_from)
+        typer.echo(f"{trade_type}:")
+        for i, spec in enumerate(specs):
+            typer.echo(
+                f"  v{spec.effective_from}  "
+                f"({len(spec.columns)} columns, record_length={spec.record_length})"
+            )
+            if i > 0:
+                _print_diff(specs[i - 1], schema.diff_specs(specs[i - 1], spec))
+
+        try:
+            schema.canonical_columns(specs)
+        except schema.SpecError as exc:
+            problems.append(f"{trade_type}: canonical-schema conflict: {exc}")
+
+    if not any_specs:
+        typer.echo(f"no specs found under {spec_dir}", err=True)
+        raise typer.Exit(code=1)
+
+    if problems:
+        typer.echo("", err=True)
+        typer.echo(f"FAIL: {len(problems)} problem(s)", err=True)
+        for p in problems:
+            typer.echo(f"  - {p}", err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo("")
+    typer.echo("OK")
 
 
 @app.command()
