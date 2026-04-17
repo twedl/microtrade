@@ -17,7 +17,6 @@ and never runs on the ingest hot path.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +29,7 @@ from microtrade.schema import (
     SpecError,
     SpecSource,
     file_sha256,
+    now_iso,
     validate_period,
     validate_spec,
 )
@@ -154,7 +154,7 @@ def read_workbook(workbook: Path, effective_from: str) -> dict[str, Spec]:
     validate_period(effective_from)
     workbook = workbook.resolve()
     sha = file_sha256(workbook)
-    imported_at = datetime.now(UTC).replace(microsecond=0).isoformat()
+    imported_at = now_iso()
 
     sheets = pl.read_excel(workbook, sheet_id=0)
     if not isinstance(sheets, dict):

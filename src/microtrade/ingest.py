@@ -45,7 +45,7 @@ def build_arrow_schema(spec: Spec) -> pa.Schema:
     live in the Hive directory path only.
     """
     fields: list[pa.Field] = []
-    for col in sorted(spec.columns, key=lambda c: c.start):
+    for col in spec.ordered_columns:
         if col.dtype not in _TO_PYARROW:
             raise IngestError(
                 f"column {col.name!r} has dtype {col.dtype!r} with no pyarrow mapping"
@@ -71,7 +71,7 @@ def iter_record_batches(
     if raw.period < spec.effective_from:
         raise IngestError(f"spec v{spec.effective_from} does not apply to period {raw.period}")
 
-    columns_ordered = sorted(spec.columns, key=lambda c: c.start)
+    columns_ordered = list(spec.ordered_columns)
     arrow_schema = build_arrow_schema(spec)
 
     with zipfile.ZipFile(raw.path) as zf:
@@ -96,6 +96,8 @@ def _stream_lines(
     encoding: str,
 ) -> Iterator[pa.RecordBatch]:
     text = io.TextIOWrapper(binstream, encoding=encoding, newline="")
+    # Precompute field slice bounds once so the per-row loop is pure indexing.
+    slices = [slice(c.start - 1, c.start - 1 + c.length) for c in columns_ordered]
     buffers: list[list[str]] = [[] for _ in columns_ordered]
     first_line_in_batch = 1
     line_no = 0
@@ -108,8 +110,8 @@ def _stream_lines(
                 f"{raw.path.name} line {line_no}: expected record_length "
                 f"{spec.record_length}, got {len(line)}"
             )
-        for buf, col in zip(buffers, columns_ordered, strict=True):
-            buf.append(line[col.start - 1 : col.start - 1 + col.length])
+        for buf, sl in zip(buffers, slices, strict=True):
+            buf.append(line[sl])
         rows_in_batch += 1
 
         if rows_in_batch >= chunk_rows:

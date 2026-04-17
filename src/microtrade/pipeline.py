@@ -19,12 +19,25 @@ import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 from microtrade import discover
 from microtrade.discover import RawInput
 from microtrade.ingest import DEFAULT_CHUNK_ROWS, build_arrow_schema, iter_record_batches
-from microtrade.schema import TRADE_TYPES, Spec, SpecError, file_sha256, load_all, resolve
+from microtrade.schema import (
+    TRADE_TYPES,
+    Spec,
+    SpecError,
+    file_sha256,
+    load_all,
+    now_iso,
+    resolve,
+)
 from microtrade.write import PartitionWriter
+
+Status = Literal["ok", "failed"]
+STATUS_OK: Status = "ok"
+STATUS_FAILED: Status = "failed"
 
 # Microsecond resolution so back-to-back reruns get distinct manifest files.
 RUN_ID_FORMAT = "%Y-%m-%dT%H-%M-%S-%fZ"
@@ -56,7 +69,7 @@ class PartitionResult:
     rows_written: int
     duration_seconds: float
     output_path: str
-    status: str  # "ok" | "failed"
+    status: Status
     error: str | None = None
 
 
@@ -73,17 +86,17 @@ class RunSummary:
 
     @property
     def ok_count(self) -> int:
-        return sum(1 for r in self.results if r.status == "ok")
+        return sum(1 for r in self.results if r.status == STATUS_OK)
 
     @property
     def failed_count(self) -> int:
-        return sum(1 for r in self.results if r.status == "failed")
+        return sum(1 for r in self.results if r.status == STATUS_FAILED)
 
 
 def run(config: PipelineConfig) -> RunSummary:
     """Execute the pipeline and return a summary with per-partition results."""
     run_id = _make_run_id()
-    started_at = _now_iso()
+    started_at = now_iso()
     raw_inputs = _select_inputs(config)
 
     results: list[PartitionResult] = []
@@ -101,7 +114,7 @@ def run(config: PipelineConfig) -> RunSummary:
     return RunSummary(
         run_id=run_id,
         started_at=started_at,
-        finished_at=_now_iso(),
+        finished_at=now_iso(),
         results=tuple(results),
     )
 
@@ -116,7 +129,9 @@ def _select_inputs(config: PipelineConfig) -> list[RawInput]:
         month=config.month,
     )
     if config.ytd and config.year is None:
-        current_year = config.current_year or datetime.now(tz=UTC).year
+        current_year = (
+            config.current_year if config.current_year is not None else datetime.now(tz=UTC).year
+        )
         candidates = discover.ytd_filter(candidates, current_year=current_year)
     return candidates
 
@@ -129,57 +144,36 @@ def _process_one(
     started_at: str,
 ) -> PartitionResult:
     start = time.perf_counter()
+    input_sha = _sha256_or_empty(raw.path)
+
     try:
         spec = _resolve_spec(raw, config.spec_dir)
     except (SpecError, FileNotFoundError) as exc:
-        return PartitionResult(
-            trade_type=raw.trade_type,
-            year=raw.year,
-            month=raw.month,
-            input_path=str(raw.path),
-            input_sha256=_sha256_or_empty(raw.path),
-            spec_version=None,
-            rows_written=0,
-            duration_seconds=time.perf_counter() - start,
-            output_path="",
-            status="failed",
-            error=f"{type(exc).__name__}: {exc}",
-        )
+        return _failure_result(raw, start, input_sha, spec_version=None, output_path="", error=exc)
 
-    input_sha = _sha256_or_empty(raw.path)
-    arrow_schema = build_arrow_schema(spec)
     writer = PartitionWriter(
         dataset_root=config.output_dir,
         trade_type=raw.trade_type,
         year=raw.year,
         month=raw.month,
-        arrow_schema=arrow_schema,
+        arrow_schema=build_arrow_schema(spec),
         compression=config.compression,
     )
-
     try:
         with writer as w:
             for batch in iter_record_batches(
-                raw,
-                spec,
-                chunk_rows=config.chunk_rows,
-                encoding=config.encoding,
+                raw, spec, chunk_rows=config.chunk_rows, encoding=config.encoding
             ):
                 w.write_batch(batch)
             rows_written = w.rows_written
     except Exception as exc:
-        return PartitionResult(
-            trade_type=raw.trade_type,
-            year=raw.year,
-            month=raw.month,
-            input_path=str(raw.path),
-            input_sha256=input_sha,
+        return _failure_result(
+            raw,
+            start,
+            input_sha,
             spec_version=spec.version,
-            rows_written=0,
-            duration_seconds=time.perf_counter() - start,
             output_path=str(writer.final_path),
-            status="failed",
-            error=f"{type(exc).__name__}: {exc}",
+            error=exc,
         )
 
     return PartitionResult(
@@ -192,7 +186,31 @@ def _process_one(
         rows_written=rows_written,
         duration_seconds=time.perf_counter() - start,
         output_path=str(writer.final_path),
-        status="ok",
+        status=STATUS_OK,
+    )
+
+
+def _failure_result(
+    raw: RawInput,
+    start: float,
+    input_sha: str,
+    *,
+    spec_version: str | None,
+    output_path: str,
+    error: BaseException,
+) -> PartitionResult:
+    return PartitionResult(
+        trade_type=raw.trade_type,
+        year=raw.year,
+        month=raw.month,
+        input_path=str(raw.path),
+        input_sha256=input_sha,
+        spec_version=spec_version,
+        rows_written=0,
+        duration_seconds=time.perf_counter() - start,
+        output_path=output_path,
+        status=STATUS_FAILED,
+        error=f"{type(error).__name__}: {error}",
     )
 
 
@@ -215,7 +233,7 @@ def _append_manifest(
     record = {
         "run_id": run_id,
         "started_at": started_at,
-        "logged_at": _now_iso(),
+        "logged_at": now_iso(),
         "trade_type": result.trade_type,
         "year": result.year,
         "month": result.month,
@@ -241,7 +259,3 @@ def _sha256_or_empty(path: Path) -> str:
 
 def _make_run_id() -> str:
     return datetime.now(tz=UTC).strftime(RUN_ID_FORMAT)
-
-
-def _now_iso() -> str:
-    return datetime.now(tz=UTC).replace(microsecond=0).isoformat()

@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +56,11 @@ class Spec:
     source: SpecSource | None = None
     derived: tuple[tuple[str, str], ...] = ()
     partition_by: tuple[str, ...] = ("year", "month")
+
+    @property
+    def ordered_columns(self) -> tuple[Column, ...]:
+        """Columns sorted by start position (the FWF read order)."""
+        return tuple(sorted(self.columns, key=lambda c: c.start))
 
 
 class SpecError(ValueError):
@@ -213,6 +219,11 @@ def resolve(specs: list[Spec], period: str) -> Spec:
             f"{specs[0].effective_from if specs else 'none'}"
         )
     return max(applicable, key=lambda s: s.effective_from)
+
+
+def now_iso() -> str:
+    """UTC timestamp truncated to seconds, ISO-formatted. Shared by import-spec and pipeline."""
+    return datetime.now(UTC).replace(microsecond=0).isoformat()
 
 
 def file_sha256(path: Path) -> str:

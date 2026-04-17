@@ -145,7 +145,7 @@ def render_fwf_lines(
 ) -> list[str]:
     """Generate `n_rows` well-formed FWF lines plus (optional) a few bad rows."""
     rng = random.Random(seed)
-    ordered = sorted(spec.columns, key=lambda c: c.start)
+    ordered = list(spec.ordered_columns)
     lines: list[str] = []
     for i in range(n_rows):
         lines.append("".join(_format_field(col, _render_value(col, rng, i)) for col in ordered))

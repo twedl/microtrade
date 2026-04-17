@@ -57,8 +57,7 @@ class PartitionWriter:
 
     def __enter__(self) -> Self:
         self.partition_dir.mkdir(parents=True, exist_ok=True)
-        if self.tmp_path.exists():
-            self.tmp_path.unlink()
+        self.tmp_path.unlink(missing_ok=True)
         self._writer = pq.ParquetWriter(
             self.tmp_path, self.arrow_schema, compression=self.compression
         )
@@ -76,13 +75,11 @@ class PartitionWriter:
             if writer is not None:
                 writer.close()
         except Exception:
-            if self.tmp_path.exists():
-                self.tmp_path.unlink()
+            self.tmp_path.unlink(missing_ok=True)
             raise
 
         if exc_type is not None:
-            if self.tmp_path.exists():
-                self.tmp_path.unlink()
+            self.tmp_path.unlink(missing_ok=True)
             return
 
         self.tmp_path.replace(self.final_path)
