@@ -270,8 +270,8 @@ wheels = [
 ]
 
 [[package]]
-name = "microtrade"
-version = "0.0.0"
+name = "microtrade-fwf"
+version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "polars", extra = ["excel"] },
