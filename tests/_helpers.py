@@ -152,15 +152,42 @@ def render_fwf_lines(
     seed: int = 0,
     include_bad: bool = False,
 ) -> list[str]:
-    """Generate `n_rows` well-formed FWF lines plus (optional) a few bad rows."""
+    """Generate `n_rows` well-formed FWF lines plus (optional) a few bad rows.
+
+    Lines are sized to `spec.record_length`; bytes not covered by any column
+    (the gaps a real workbook fills with ``Blank`` padding rows) are left as
+    spaces, so the output round-trips cleanly through `iter_record_batches`
+    even for specs with non-contiguous column layouts.
+    """
     rng = random.Random(seed)
     ordered = list(spec.ordered_columns)
-    lines: list[str] = []
-    for i in range(n_rows):
-        lines.append("".join(_format_field(col, _render_value(col, rng, i)) for col in ordered))
+    lines = [_render_line(spec, ordered, rng, i) for i in range(n_rows)]
     if include_bad:
         lines.extend(_bad_rows(spec, rng, ordered))
     return lines
+
+
+def _render_line(
+    spec: Spec,
+    ordered: list[Column],
+    rng: random.Random,
+    row_idx: int,
+    overrides: dict[str, str] | None = None,
+) -> str:
+    """Render a single FWF line sized to `spec.record_length`.
+
+    `overrides` replaces the normally-rendered chunk for the named columns -
+    used by `_bad_rows` to inject blanks into a nullable column or garbage
+    into a numeric column without having to reconstruct the whole line.
+    """
+    buf = bytearray(b" " * spec.record_length)
+    for col in ordered:
+        if overrides is not None and col.name in overrides:
+            chunk = overrides[col.name]
+        else:
+            chunk = _format_field(col, _render_value(col, rng, row_idx))
+        buf[col.start - 1 : col.start - 1 + col.length] = chunk.encode("utf-8")
+    return buf.decode("utf-8")
 
 
 def _bad_rows(spec: Spec, rng: random.Random, ordered: list[Column]) -> list[str]:
@@ -171,29 +198,18 @@ def _bad_rows(spec: Spec, rng: random.Random, ordered: list[Column]) -> list[str
     nullable_cols = [c for c in ordered if c.nullable]
     if nullable_cols:
         target = nullable_cols[0]
-        parts = []
-        for col in ordered:
-            if col.name == target.name:
-                parts.append(" " * col.length)
-            else:
-                parts.append(_format_field(col, _render_value(col, rng, -1)))
-        bad.append("".join(parts))
+        bad.append(_render_line(spec, ordered, rng, -1, {target.name: " " * target.length}))
 
     # Line truncated by 5 characters (should be rejected by record_length check).
-    full = "".join(_format_field(col, _render_value(col, rng, -2)) for col in ordered)
-    bad.append(full[:-5])
+    bad.append(_render_line(spec, ordered, rng, -2)[:-5])
 
     # Garbage in a numeric field (non-digit chars) - should fail dtype cast.
     numeric_cols = [c for c in ordered if c.dtype in {"Int64", "Float64"}]
     if numeric_cols:
         target = numeric_cols[0]
-        parts = []
-        for col in ordered:
-            if col.name == target.name:
-                parts.append(_format_field(col, "ABCDE"))
-            else:
-                parts.append(_format_field(col, _render_value(col, rng, -3)))
-        bad.append("".join(parts))
+        bad.append(
+            _render_line(spec, ordered, rng, -3, {target.name: _format_field(target, "ABCDE")})
+        )
 
     return bad
 
