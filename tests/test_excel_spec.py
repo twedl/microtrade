@@ -195,7 +195,8 @@ def test_validate_specs_ok_on_clean_tree(schema_workbook: Path, tmp_path: Path) 
 
     result = CliRunner().invoke(app, ["validate-specs", "--spec-dir", str(spec_dir)])
     assert result.exit_code == 0, result.output
-    assert "OK" in result.output
+    # Summary reports 3 trade types x 2 specs each = 6 specs total.
+    assert "OK (3 trade types, 6 specs)" in result.output
     assert "imports:" in result.output
     assert "v2020-01" in result.output
     assert "v2024-06" in result.output
@@ -282,3 +283,64 @@ def test_validate_specs_empty_tree_exits_nonzero(tmp_path: Path) -> None:
     result = CliRunner().invoke(app, ["validate-specs", "--spec-dir", str(spec_dir)])
     assert result.exit_code == 1
     assert "no specs found" in result.output
+
+
+def test_validate_specs_passes_against_shipping_specs() -> None:
+    """Regression guard: the committed `src/microtrade/specs/*/v2020-01.yaml`
+    files must always pass `validate-specs` with the default `--spec-dir`."""
+    result = CliRunner().invoke(app, ["validate-specs"])
+    assert result.exit_code == 0, result.output
+    # Shipping tree: one spec per trade type.
+    assert "OK (3 trade types, 3 specs)" in result.output
+    for trade_type in TRADE_TYPES:
+        assert f"{trade_type}:" in result.output
+
+
+def test_validate_specs_continues_across_trade_types(schema_workbook: Path, tmp_path: Path) -> None:
+    """A bad spec under one trade type must not suppress the scan of the others."""
+    spec_dir = tmp_path / "specs"
+    _seed_valid_specs(spec_dir, schema_workbook)
+    # Corrupt only the imports YAML; the other two remain valid.
+    (spec_dir / "imports" / "v2020-01.yaml").write_text(
+        "trade_type: imports\n"
+        "version: '2020-01'\n"
+        "effective_from: '2020-01'\n"
+        "record_length: 10\n"
+        "columns:\n"
+        "  - {name: a, start: 1, length: 5, dtype: Utf8}\n"
+        "  - {name: b, start: 4, length: 5, dtype: Utf8}\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(app, ["validate-specs", "--spec-dir", str(spec_dir)])
+    assert result.exit_code == 1
+    assert "overlaps" in result.output  # imports problem reported
+    # The other two trade types still get their summaries despite the failure.
+    assert "exports_us:" in result.output
+    assert "exports_nonus:" in result.output
+
+
+def test_validate_specs_ignores_non_v_prefixed_yaml(schema_workbook: Path, tmp_path: Path) -> None:
+    """Files that don't match the `v*.yaml` glob are ignored - they can hold
+    backups, notes, or editor droppings without breaking validation."""
+    spec_dir = tmp_path / "specs"
+    _seed_valid_specs(spec_dir, schema_workbook)
+    (spec_dir / "imports" / "backup.yaml").write_text("not a spec\n", encoding="utf-8")
+    (spec_dir / "imports" / "README.yaml").write_text("also not a spec\n", encoding="utf-8")
+
+    result = CliRunner().invoke(app, ["validate-specs", "--spec-dir", str(spec_dir)])
+    assert result.exit_code == 0, result.output
+    assert "OK" in result.output
+
+
+def test_validate_specs_pluralizes_summary_for_singletons(
+    schema_workbook: Path, tmp_path: Path
+) -> None:
+    """Summary uses singular forms when exactly one of each is scanned."""
+    spec_dir = tmp_path / "specs"
+    imports_spec = read_workbook(schema_workbook, "2020-01")["imports"]
+    schema.save_spec(imports_spec, spec_dir / "imports" / "v2020-01.yaml")
+
+    result = CliRunner().invoke(app, ["validate-specs", "--spec-dir", str(spec_dir)])
+    assert result.exit_code == 0, result.output
+    assert "OK (1 trade type, 1 spec)" in result.output
