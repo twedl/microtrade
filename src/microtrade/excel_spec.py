@@ -82,12 +82,40 @@ _PARSE_FOR_DTYPE: Mapping[str, str | None] = {
 
 _BLANK_FIELD: str = "blank"
 
+# Substrings we expect to find in each trade type's sheet preamble (case-insensitive).
+# Used as a cheap, high-signal sanity check that a positionally-mapped sheet is
+# actually describing the trade type we think it is. `forbidden` keeps
+# `exports_us` from matching an `exports_nonus` sheet whose preamble happens
+# to contain "export" + "us" (from "Non-US").
+_TitleHint = tuple[tuple[str, ...], tuple[str, ...]]  # (required, forbidden)
+_TITLE_HINTS: Mapping[str, _TitleHint] = {
+    "imports": (("import",), ()),
+    "exports_us": (("export", "us"), ("non",)),
+    "exports_nonus": (("export", "non"), ()),
+}
+_PREAMBLE_ROWS: int = 5
+
 
 def normalize_dtype(raw: str) -> str:
     key = raw.strip().lower()
     if key in _DTYPE_ALIASES:
         return _DTYPE_ALIASES[key]
     raise SpecError(f"unrecognized dtype {raw!r}; known: {sorted(set(_DTYPE_ALIASES.values()))}")
+
+
+def _preamble_text(df: pl.DataFrame) -> str:
+    """Collect the first few rows of `df` into a single lowercased string.
+
+    Used only for fuzzy title matching - we don't care about structure here.
+    """
+    rows = df.head(_PREAMBLE_ROWS).iter_rows()
+    return " ".join(str(c).lower() for row in rows for c in row if c is not None)
+
+
+def _sheet_title_matches(df: pl.DataFrame, trade_type: str) -> bool:
+    required, forbidden = _TITLE_HINTS[trade_type]
+    preamble = _preamble_text(df)
+    return all(r in preamble for r in required) and not any(f in preamble for f in forbidden)
 
 
 def _coerce_bool(value: Any) -> bool:
@@ -256,7 +284,16 @@ def read_workbook(workbook: Path, effective_from: str) -> dict[str, Spec]:
         )
 
     out: dict[str, Spec] = {}
-    for trade_type, (sheet_name, df) in zip(TRADE_TYPES, sheet_items, strict=False):
+    for position, (trade_type, (sheet_name, df)) in enumerate(
+        zip(TRADE_TYPES, sheet_items, strict=False), start=1
+    ):
+        if not _sheet_title_matches(df, trade_type):
+            preamble_excerpt = _preamble_text(df)[:160]
+            raise SpecError(
+                f"sheet {sheet_name!r} at position {position} does not look like a "
+                f"{trade_type!r} layout; preamble reads: {preamble_excerpt!r}. "
+                f"Expected sheet order: {list(TRADE_TYPES)}."
+            )
         columns, record_length = _sheet_to_layout(df, sheet_name)
         spec = Spec(
             trade_type=trade_type,

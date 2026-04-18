@@ -99,6 +99,66 @@ def test_read_workbook_skips_blank_filler_rows(tmp_path: Path) -> None:
     assert imports.record_length == 19  # trailing Blank pushes it past `value`'s end (16)
 
 
+def _minimal_sheet(ws, title: str) -> None:
+    """Seed a workbook sheet with a preamble title + one-column field table."""
+    ws.append([title, None, None, None])
+    ws.append(["Position", "Description", "Length", "Type"])
+    ws.append([1, "code", 5, "Char"])
+
+
+def test_read_workbook_rejects_mis_ordered_sheets(tmp_path: Path) -> None:
+    """Swapping the imports and exports_us sheets should raise, not silently
+    produce YAML where `imports` actually describes the exports layout."""
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    wb.remove(wb.active)
+    # Position 1 holds the exports_us preamble; positions 2 and 3 are fine.
+    _minimal_sheet(wb.create_sheet("SHEET001"), "Exports for all HS8 codes (US-CA)")
+    _minimal_sheet(wb.create_sheet("SHEET002"), "Imports for All HS10 codes")
+    _minimal_sheet(wb.create_sheet("SHEET003"), "Exports for all HS8 codes (Non-US)")
+    path = tmp_path / "wb.xlsx"
+    wb.save(path)
+
+    with pytest.raises(SpecError, match=r"position 1 does not look like a 'imports'"):
+        read_workbook(path, "2024-01")
+
+
+def test_read_workbook_discriminates_exports_us_from_exports_nonus(tmp_path: Path) -> None:
+    """The exports_nonus preamble ("...(Non-US)") contains "export" and "us",
+    so `exports_us` must NOT accept it - the forbidden `"non"` hint handles that.
+    Putting the exports_nonus sheet at position 2 (where exports_us belongs)
+    should raise."""
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    wb.remove(wb.active)
+    _minimal_sheet(wb.create_sheet("SHEET001"), "Imports for All HS10 codes")
+    _minimal_sheet(wb.create_sheet("SHEET002"), "Exports for all HS8 codes (Non-US)")
+    _minimal_sheet(wb.create_sheet("SHEET003"), "Exports for all HS8 codes (US-CA)")
+    path = tmp_path / "wb.xlsx"
+    wb.save(path)
+
+    with pytest.raises(SpecError, match=r"position 2 does not look like a 'exports_us'"):
+        read_workbook(path, "2024-01")
+
+
+def test_read_workbook_rejects_unlabeled_preambles(tmp_path: Path) -> None:
+    """A workbook whose sheets carry only generic titles (no trade-type hint)
+    fails the sanity check - better to refuse than to commit swapped YAML."""
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    wb.remove(wb.active)
+    for i in range(1, 4):
+        _minimal_sheet(wb.create_sheet(f"SHEET{i:03d}"), f"Generic Layout {i}")
+    path = tmp_path / "wb.xlsx"
+    wb.save(path)
+
+    with pytest.raises(SpecError, match="does not look like a 'imports'"):
+        read_workbook(path, "2024-01")
+
+
 def test_import_spec_cli_writes_yaml(schema_workbook: Path, tmp_path: Path) -> None:
     out_dir = tmp_path / "specs"
     result = CliRunner().invoke(
