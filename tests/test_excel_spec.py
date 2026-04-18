@@ -195,7 +195,8 @@ def test_validate_specs_ok_on_clean_tree(schema_workbook: Path, tmp_path: Path) 
 
     result = CliRunner().invoke(app, ["validate-specs", "--spec-dir", str(spec_dir)])
     assert result.exit_code == 0, result.output
-    assert "OK" in result.output
+    # Summary reports 3 trade types x 2 specs each = 6 specs total.
+    assert "OK (3 trade types, 6 specs)" in result.output
     assert "imports:" in result.output
     assert "v2020-01" in result.output
     assert "v2024-06" in result.output
@@ -289,7 +290,8 @@ def test_validate_specs_passes_against_shipping_specs() -> None:
     files must always pass `validate-specs` with the default `--spec-dir`."""
     result = CliRunner().invoke(app, ["validate-specs"])
     assert result.exit_code == 0, result.output
-    assert "OK" in result.output
+    # Shipping tree: one spec per trade type.
+    assert "OK (3 trade types, 3 specs)" in result.output
     for trade_type in TRADE_TYPES:
         assert f"{trade_type}:" in result.output
 
@@ -329,3 +331,16 @@ def test_validate_specs_ignores_non_v_prefixed_yaml(schema_workbook: Path, tmp_p
     result = CliRunner().invoke(app, ["validate-specs", "--spec-dir", str(spec_dir)])
     assert result.exit_code == 0, result.output
     assert "OK" in result.output
+
+
+def test_validate_specs_pluralizes_summary_for_singletons(
+    schema_workbook: Path, tmp_path: Path
+) -> None:
+    """Summary uses singular forms when exactly one of each is scanned."""
+    spec_dir = tmp_path / "specs"
+    imports_spec = read_workbook(schema_workbook, "2020-01")["imports"]
+    schema.save_spec(imports_spec, spec_dir / "imports" / "v2020-01.yaml")
+
+    result = CliRunner().invoke(app, ["validate-specs", "--spec-dir", str(spec_dir)])
+    assert result.exit_code == 0, result.output
+    assert "OK (1 trade type, 1 spec)" in result.output

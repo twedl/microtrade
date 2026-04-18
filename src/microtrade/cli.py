@@ -145,6 +145,8 @@ def validate_specs(
     """
     problems: list[str] = []
     any_specs = False
+    trade_types_scanned = 0
+    total_specs = 0
 
     for trade_type in schema.TRADE_TYPES:
         trade_dir = spec_dir / trade_type
@@ -172,6 +174,8 @@ def validate_specs(
 
         if not specs:
             continue
+        trade_types_scanned += 1
+        total_specs += len(specs)
 
         specs.sort(key=lambda s: s.effective_from)
         typer.echo(f"{trade_type}:")
@@ -199,8 +203,10 @@ def validate_specs(
             typer.echo(f"  - {p}", err=True)
         raise typer.Exit(code=1)
 
+    tt_label = "trade type" if trade_types_scanned == 1 else "trade types"
+    spec_label = "spec" if total_specs == 1 else "specs"
     typer.echo("")
-    typer.echo("OK")
+    typer.echo(f"OK ({trade_types_scanned} {tt_label}, {total_specs} {spec_label})")
 
 
 @app.command()
