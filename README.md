@@ -154,13 +154,13 @@ code paths match the real production workflow end-to-end.
 ## Status
 
 The pipeline is feature-complete: scaffolding, Excel → YAML, discover + ingest
-+ write, and the orchestrated CLI `microtrade ingest` are all landed and
-covered, alongside `microtrade inspect` for dumping the resolved spec and
-first rows of a raw zip or FWF file. The `validate-specs` subcommand is still
-a stub. Reference YAML specs generated from `examples/microdata-layout.xls`
-ship under `src/microtrade/specs/`; replace them by running `microtrade
-import-spec` against the real schema workbook (typically with a later
-`--effective-from`, which preserves the historical layouts).
++ write, and the orchestrated CLI subcommands (`ingest`, `import-spec`,
+`inspect`, `validate-specs`) are all landed and covered. Reference YAML
+specs generated from `examples/microdata-layout.xls` ship under
+`src/microtrade/specs/`; replace them by running `microtrade import-spec`
+against the real schema workbook (typically with a later `--effective-from`,
+which preserves the historical layouts). Run `microtrade validate-specs`
+after importing to catch dtype conflicts between versions.
 
 ## License
 

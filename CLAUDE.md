@@ -57,5 +57,6 @@ Core pipeline is feature-complete and covers every documented invariant:
 - reference YAML specs generated from `examples/microdata-layout.xls` ship under `src/microtrade/specs/`.
 
 - `microtrade inspect PATH` dumps the resolved spec plus the first N rows of a raw zip (or plain FWF via `--type` / `--period`), with per-column `[start..end] dtype 'value'` annotation; `--raw` prints full lines unannotated.
+- `microtrade validate-specs` walks `<spec_dir>/<trade_type>/v*.yaml`, runs `validate_spec` on each, checks the filename version matches `effective_from`, prints a per-trade-type version-to-version diff, and verifies `canonical_columns` across versions. Exits 0 on a clean tree, 1 on any problem (reports to stderr).
 
-Remaining: `validate-specs` is still a stub (exit code 2). Consumers that hive-scan the dataset should use a `**/*.parquet` glob because `_dataset_schema.json` lives at the dataset root per CLAUDE.md's path.
+Consumers that hive-scan the dataset should use a `**/*.parquet` glob because `_dataset_schema.json` lives at the dataset root per CLAUDE.md's path.

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from microtrade import schema
 from microtrade.cli import app
 from microtrade.excel_spec import normalize_dtype, read_workbook
 from microtrade.schema import TRADE_TYPES, SpecError, load_spec
@@ -172,3 +173,112 @@ def test_import_spec_cli_refuses_overwrite_without_force(
         ],
     )
     assert forced.exit_code == 0
+
+
+# --- validate-specs ---------------------------------------------------------
+
+
+def _seed_valid_specs(spec_dir: Path, schema_workbook: Path) -> None:
+    """Helper: drop v2020-01 specs for all three trade types into `spec_dir`."""
+    specs = read_workbook(schema_workbook, "2020-01")
+    for trade_type, spec in specs.items():
+        schema.save_spec(spec, spec_dir / trade_type / "v2020-01.yaml")
+
+
+def test_validate_specs_ok_on_clean_tree(schema_workbook: Path, tmp_path: Path) -> None:
+    spec_dir = tmp_path / "specs"
+    _seed_valid_specs(spec_dir, schema_workbook)
+    # Add a second version so the command exercises the diff path.
+    v2_specs = read_workbook(schema_workbook, "2024-06")
+    for trade_type, spec in v2_specs.items():
+        schema.save_spec(spec, spec_dir / trade_type / "v2024-06.yaml")
+
+    result = CliRunner().invoke(app, ["validate-specs", "--spec-dir", str(spec_dir)])
+    assert result.exit_code == 0, result.output
+    assert "OK" in result.output
+    assert "imports:" in result.output
+    assert "v2020-01" in result.output
+    assert "v2024-06" in result.output
+    # Identical specs => "no column changes" in the diff section.
+    assert "no column changes" in result.output
+
+
+def test_validate_specs_reports_invalid_yaml(schema_workbook: Path, tmp_path: Path) -> None:
+    spec_dir = tmp_path / "specs"
+    _seed_valid_specs(spec_dir, schema_workbook)
+    # Overwrite the imports spec with one that has overlapping columns.
+    bad = spec_dir / "imports" / "v2020-01.yaml"
+    bad.write_text(
+        "trade_type: imports\n"
+        "version: '2020-01'\n"
+        "effective_from: '2020-01'\n"
+        "record_length: 10\n"
+        "columns:\n"
+        "  - {name: a, start: 1, length: 5, dtype: Utf8}\n"
+        "  - {name: b, start: 4, length: 5, dtype: Utf8}\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(app, ["validate-specs", "--spec-dir", str(spec_dir)])
+    assert result.exit_code == 1
+    assert "FAIL" in result.output
+    assert "overlaps" in result.output
+    assert str(bad) in result.output
+
+
+def test_validate_specs_rejects_filename_version_mismatch(
+    schema_workbook: Path, tmp_path: Path
+) -> None:
+    spec_dir = tmp_path / "specs"
+    _seed_valid_specs(spec_dir, schema_workbook)
+    # Rename the imports YAML so the filename version disagrees with effective_from.
+    (spec_dir / "imports" / "v2020-01.yaml").rename(spec_dir / "imports" / "v2020-02.yaml")
+
+    result = CliRunner().invoke(app, ["validate-specs", "--spec-dir", str(spec_dir)])
+    assert result.exit_code == 1
+    assert "does not match effective_from" in result.output
+
+
+def test_validate_specs_reports_dtype_conflict_across_versions(
+    schema_workbook: Path, tmp_path: Path
+) -> None:
+    spec_dir = tmp_path / "specs"
+    _seed_valid_specs(spec_dir, schema_workbook)
+    # Write a v2024-06 for imports that conflicts on `value_usd` dtype (Int64 -> Float64).
+    v2 = read_workbook(schema_workbook, "2024-06")["imports"]
+    new_cols = tuple(
+        schema.Column(
+            name=c.name,
+            start=c.start,
+            length=c.length,
+            dtype="Float64" if c.name == "value_usd" else c.dtype,
+            nullable=c.nullable,
+            parse=c.parse,
+            description=c.description,
+        )
+        for c in v2.columns
+    )
+    v2_conflicting = schema.Spec(
+        trade_type=v2.trade_type,
+        version=v2.version,
+        effective_from=v2.effective_from,
+        record_length=v2.record_length,
+        columns=new_cols,
+        source=v2.source,
+        derived=v2.derived,
+        partition_by=v2.partition_by,
+    )
+    schema.save_spec(v2_conflicting, spec_dir / "imports" / "v2024-06.yaml")
+
+    result = CliRunner().invoke(app, ["validate-specs", "--spec-dir", str(spec_dir)])
+    assert result.exit_code == 1
+    assert "canonical-schema conflict" in result.output
+    assert "value_usd" in result.output
+
+
+def test_validate_specs_empty_tree_exits_nonzero(tmp_path: Path) -> None:
+    spec_dir = tmp_path / "empty-specs"
+    spec_dir.mkdir()
+    result = CliRunner().invoke(app, ["validate-specs", "--spec-dir", str(spec_dir)])
+    assert result.exit_code == 1
+    assert "no specs found" in result.output
