@@ -59,6 +59,10 @@ STATUS_FAILED: Status = "failed"
 RUN_ID_FORMAT = "%Y-%m-%dT%H-%M-%S-%fZ"
 
 
+DEFAULT_MAX_QUALITY_ISSUES: int = 10_000
+DEFAULT_MAX_SKIP_RATE: float = 0.5
+
+
 @dataclass(frozen=True)
 class PipelineConfig:
     input_dir: Path
@@ -72,6 +76,13 @@ class PipelineConfig:
     chunk_rows: int = DEFAULT_CHUNK_ROWS
     compression: str = "zstd"
     encoding: str = "utf-8"
+    # Cap per-partition quality-issue JSONL records so a pathological file
+    # can't balloon the log to input-file size. 0 disables the cap.
+    max_quality_issues: int = DEFAULT_MAX_QUALITY_ISSUES
+    # Abort the partition (and delete its temp parquet) if the fraction of
+    # rows that failed to parse exceeds this threshold. 1.0 disables the
+    # abort - row-level failures just accumulate.
+    max_skip_rate: float = DEFAULT_MAX_SKIP_RATE
 
 
 @dataclass(frozen=True)
@@ -84,6 +95,9 @@ class PartitionResult:
     spec_version: str | None
     rows_written: int
     rows_skipped: int
+    # `rows_skipped_logged` is <= `rows_skipped`; they diverge only when the
+    # `max_quality_issues` cap truncates the JSONL mid-run.
+    rows_skipped_logged: int
     duration_seconds: float
     output_path: str
     status: Status
@@ -188,7 +202,9 @@ def _process_one(
         arrow_schema=build_arrow_schema(spec),
         compression=config.compression,
     )
-    with _QualityIssueWriter(path=quality_path, run_id=run_id, raw=raw) as issue_sink:
+    with _QualityIssueWriter(
+        path=quality_path, run_id=run_id, raw=raw, limit=config.max_quality_issues
+    ) as issue_sink:
         try:
             with writer as w:
                 for batch in iter_record_batches(
@@ -200,6 +216,7 @@ def _process_one(
                 ):
                     w.write_batch(batch)
                 rows_written = w.rows_written
+                _check_skip_rate(rows_written, issue_sink.count, config.max_skip_rate)
         except (IngestError, WriteError, OSError, ValueError) as exc:
             return _failure_result(
                 raw,
@@ -209,6 +226,7 @@ def _process_one(
                 output_path=str(writer.final_path),
                 error=exc,
                 rows_skipped=issue_sink.count,
+                rows_skipped_logged=issue_sink.count_logged,
             )
 
         return PartitionResult(
@@ -220,9 +238,28 @@ def _process_one(
             spec_version=spec.version,
             rows_written=rows_written,
             rows_skipped=issue_sink.count,
+            rows_skipped_logged=issue_sink.count_logged,
             duration_seconds=time.perf_counter() - start,
             output_path=str(writer.final_path),
             status=STATUS_OK,
+        )
+
+
+def _check_skip_rate(rows_written: int, rows_skipped: int, threshold: float) -> None:
+    """Raise IngestError if the partition's bad-row fraction exceeds threshold.
+
+    Called inside the PartitionWriter `with` block so the temp parquet gets
+    cleaned up. Treats `threshold >= 1.0` as "never abort" and empty inputs
+    as implicitly fine (no rows = no ratio).
+    """
+    total = rows_written + rows_skipped
+    if threshold >= 1.0 or total == 0:
+        return
+    rate = rows_skipped / total
+    if rate > threshold:
+        raise IngestError(
+            f"{rows_skipped}/{total} rows failed parsing ({rate:.1%}); "
+            f"exceeds max_skip_rate {threshold:.1%}"
         )
 
 
@@ -235,6 +272,7 @@ def _failure_result(
     output_path: str,
     error: BaseException,
     rows_skipped: int = 0,
+    rows_skipped_logged: int = 0,
 ) -> PartitionResult:
     return PartitionResult(
         trade_type=raw.trade_type,
@@ -245,6 +283,7 @@ def _failure_result(
         spec_version=spec_version,
         rows_written=0,
         rows_skipped=rows_skipped,
+        rows_skipped_logged=rows_skipped_logged,
         duration_seconds=time.perf_counter() - start,
         output_path=output_path,
         status=STATUS_FAILED,
@@ -291,6 +330,7 @@ def _append_manifest(
             "spec_version": result.spec_version,
             "rows_written": result.rows_written,
             "rows_skipped": result.rows_skipped,
+            "rows_skipped_logged": result.rows_skipped_logged,
             "duration_seconds": round(result.duration_seconds, 4),
             "output_path": result.output_path,
             "status": result.status,
@@ -323,16 +363,21 @@ class _QualityIssueWriter:
 
     Holds one open file handle across the partition so high-volume error
     streams don't pay open/close syscalls per row; creates the parent
-    directory on first write. `.count` is exposed so the pipeline can record
-    `rows_skipped` without a separate counter object.
+    directory on first write. `.count` tracks every issue seen (used for
+    the manifest's `rows_skipped` and the pipeline's skip-rate abort
+    check), while `.count_logged` tracks only those written to disk -
+    the two diverge once `limit` is reached so pathological partitions
+    can't balloon the log to input-file size.
     """
 
-    def __init__(self, *, path: Path, run_id: str, raw: RawInput) -> None:
+    def __init__(self, *, path: Path, run_id: str, raw: RawInput, limit: int = 0) -> None:
         self._path = path
         self._run_id = run_id
         self._raw = raw
+        self._limit = limit
         self._file: TextIO | None = None
         self.count: int = 0
+        self.count_logged: int = 0
 
     def __enter__(self) -> _QualityIssueWriter:
         return self
@@ -348,6 +393,9 @@ class _QualityIssueWriter:
             self._file = None
 
     def __call__(self, issue: QualityIssue) -> None:
+        self.count += 1
+        if self._limit > 0 and self.count_logged >= self._limit:
+            return
         if self._file is None:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             self._file = self._path.open("a", encoding="utf-8")
@@ -365,7 +413,7 @@ class _QualityIssueWriter:
             "logged_at": now_iso(),
         }
         self._file.write(json.dumps(record, sort_keys=True) + "\n")
-        self.count += 1
+        self.count_logged += 1
 
 
 def _sha256_or_empty(path: Path) -> str:

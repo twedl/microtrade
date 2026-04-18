@@ -217,6 +217,86 @@ def test_pipeline_row_level_error_logged_to_quality_issues(prepared_env) -> None
     assert "cannot parse" in records[0]["error"]
 
 
+def _make_bad_imports_zip(env: dict[str, Path], n_good: int, n_bad: int) -> Path:
+    """Replace the 2024-01 imports zip with `n_good` valid rows and `n_bad`
+    rows that have garbage bytes in the non-nullable `value_usd` column."""
+    target = env["input"] / "imports_202401.zip"
+    target.unlink()
+    spec = excel_spec.read_workbook(env["tmp"] / "schema_workbook.xlsx", "2020-01")["imports"]
+    col = {c.name: c for c in spec.columns}["value_usd"]
+    good = render_fwf_lines(spec, n_rows=n_good + n_bad, seed=0)
+    lines = list(good[:n_good])
+    for src in good[n_good : n_good + n_bad]:
+        lines.append(src[: col.start - 1] + "ABCDEABCDEABCDE" + src[col.start - 1 + col.length :])
+    make_zip_input(target, lines)
+    return target
+
+
+def test_pipeline_quality_log_honors_cap(prepared_env) -> None:
+    """With `max_quality_issues=3`, only the first 3 bad rows land in the
+    JSONL file; `rows_skipped` in the manifest still reflects the full count."""
+    env = prepared_env
+    _make_bad_imports_zip(env, n_good=2, n_bad=10)
+
+    summary = pipeline.run(_config(env, max_quality_issues=3, max_skip_rate=1.0))
+    partition = next(
+        r for r in summary.results if r.trade_type == "imports" and (r.year, r.month) == (2024, 1)
+    )
+    assert partition.status == "ok"
+    assert partition.rows_written == 2
+    assert partition.rows_skipped == 10
+    assert partition.rows_skipped_logged == 3
+
+    issues_file = env["output"] / "_quality_issues" / "imports" / f"{summary.run_id}.jsonl"
+    records = [json.loads(line) for line in issues_file.read_text().strip().splitlines()]
+    assert len(records) == 3
+
+    manifest = next((env["output"] / "_manifests" / "imports").glob("*.jsonl")).read_text()
+    entries = [json.loads(line) for line in manifest.strip().splitlines()]
+    imports_jan = next(e for e in entries if (e["year"], e["month"]) == (2024, 1))
+    assert imports_jan["rows_skipped"] == 10
+    assert imports_jan["rows_skipped_logged"] == 3
+
+
+def test_pipeline_aborts_when_skip_rate_exceeded(prepared_env) -> None:
+    """Partition with > max_skip_rate bad rows fails with an IngestError,
+    the temp parquet is cleaned up, and the quality log still records the bad rows."""
+    env = prepared_env
+    _make_bad_imports_zip(env, n_good=1, n_bad=9)
+
+    summary = pipeline.run(_config(env, max_skip_rate=0.5))
+    failed = next(r for r in summary.results if r.status == "failed")
+    assert failed.trade_type == "imports"
+    assert failed.year == 2024 and failed.month == 1
+    assert "max_skip_rate" in (failed.error or "")
+
+    # The aborted partition's temp parquet is not left behind.
+    partition_dir = env["output"] / "imports" / "year=2024" / "month=01"
+    if partition_dir.exists():
+        assert list(partition_dir.iterdir()) == []
+
+    # Quality log still has the skipped rows for post-mortem.
+    issues_file = env["output"] / "_quality_issues" / "imports" / f"{summary.run_id}.jsonl"
+    assert issues_file.exists()
+    records = [json.loads(line) for line in issues_file.read_text().strip().splitlines()]
+    assert len(records) == 9
+
+
+def test_pipeline_skip_rate_disabled_with_one_point_zero(prepared_env) -> None:
+    """`max_skip_rate=1.0` preserves pre-cap behavior - even mostly-bad
+    partitions still write successfully (modulo the quality log)."""
+    env = prepared_env
+    _make_bad_imports_zip(env, n_good=1, n_bad=9)
+
+    summary = pipeline.run(_config(env, max_skip_rate=1.0))
+    partition = next(
+        r for r in summary.results if r.trade_type == "imports" and (r.year, r.month) == (2024, 1)
+    )
+    assert partition.status == "ok"
+    assert partition.rows_written == 1
+    assert partition.rows_skipped == 9
+
+
 def test_pipeline_writes_canonical_dataset_schema(prepared_env) -> None:
     env = prepared_env
     pipeline.run(_config(env))
