@@ -76,6 +76,19 @@ def ingest(
     ),
     compression: str = typer.Option("zstd", "--compression"),
     encoding: str = typer.Option("utf-8", "--encoding"),
+    max_quality_issues: int = typer.Option(
+        pipeline.DEFAULT_MAX_QUALITY_ISSUES,
+        "--max-quality-issues",
+        help="Cap on quality-issue JSONL records per partition (0 = unlimited). "
+        "Total skipped-row count is still tracked in the manifest even when the cap truncates.",
+    ),
+    max_skip_rate: float = typer.Option(
+        pipeline.DEFAULT_MAX_SKIP_RATE,
+        "--max-skip-rate",
+        min=0.0,
+        max=1.0,
+        help="Abort a partition if this fraction of rows fails to parse (1.0 = never abort).",
+    ),
 ) -> None:
     """Process zipped FWF inputs into per-type Hive-partitioned Parquet datasets."""
     wanted_types = tuple(trade_types) if trade_types else schema.TRADE_TYPES
@@ -96,6 +109,8 @@ def ingest(
         chunk_rows=chunk_rows,
         compression=compression,
         encoding=encoding,
+        max_quality_issues=max_quality_issues,
+        max_skip_rate=max_skip_rate,
     )
 
     summary = pipeline.run(config)
