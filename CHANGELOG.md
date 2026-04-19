@@ -6,6 +6,65 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-04-19
+
+Moves discovery configuration into a user-supplied project YAML so raw
+filenames no longer have to follow a fixed `<trade_type>_<YYYYMM>.zip`
+convention.
+
+### Added
+
+- Project config (`microtrade.yaml`, `--config` override) declaring, per
+  workbook: `effective_from`, optional `effective_to`, `workbook_id`, and
+  a per-sheet `filename_pattern` regex. `microtrade import-spec PATH.xlsx`
+  reads this file instead of taking `--effective-from` / `--workbook-id`
+  flags.
+- `Spec.effective_to` (inclusive upper bound, `None` = open-ended).
+  `schema.resolve` now picks the spec whose `[effective_from,
+  effective_to]` window contains the target period. `validate-specs`
+  flags overlapping and gapped windows, and reports a per-spec window in
+  its summary.
+- `SpecSource.filename_pattern` — each committed spec embeds its own
+  regex (named groups `year`, `month`, optional `flag`). `discover`
+  iterates every committed spec's pattern to route files; ambiguous
+  matches (one file matching multiple specs) raise.
+- `SpecSource.workbook_id` — stable identifier baked in from the config
+  (defaults to the workbook filename prefix).
+- N/C flag preference: when upstream publishes both a `N` and `C` copy
+  of the same `(trade_type, year, month)`, the `N` file wins.
+- Shared helpers `schema.validate_filename_pattern`,
+  `validate_period_window`, `next_period`, and `window_problems` so
+  config and discover don't re-implement the same checks.
+
+### Changed
+
+- **Breaking:** `microtrade import-spec` CLI drops `--effective-from`
+  and `--workbook-id`; reads them from the project config.
+- **Breaking:** `excel_spec.read_workbook(path, effective_from, *,
+  workbook_id=...)` → `read_workbook(path, WorkbookConfig)`. Sheets are
+  looked up by name (with an optional positional fallback) instead of
+  by sheet index; the positional/title-hint sanity check is gone —
+  users declare trade types explicitly in the config.
+- `discover.parse_filename` / `scan` take pattern entries (or a
+  `spec_dir` to load them from) instead of matching a hardcoded
+  `<trade_type>_<YYYYMM>.zip` regex.
+- `pipeline.run` loads each trade type's specs once per run instead of
+  re-parsing YAML per partition.
+
+### Fixed
+
+- `load_config` replaces a TOCTOU `is_file()` pre-check with a direct
+  `read_text()` that maps filesystem errors to `ConfigError`.
+- `excel_spec.read_workbook` raises `SpecError` (not `IndexError`) when
+  a config lists more sheets than positional trade-type slots without
+  declaring an explicit `trade_type`.
+
+### Notes
+
+- The reference YAML specs under `src/microtrade/specs/` predate this
+  release and carry no `filename_pattern`; they load but won't route
+  any files. Tracked in issue #16.
+
 ## [0.1.0] - 2026-04-18
 
 First public release. Published to PyPI as `microtrade-fwf`; the import path
@@ -59,5 +118,6 @@ and CLI command stay `microtrade`.
   `inspect`) ship implemented; the package is fully typed (`py.typed`
   marker included in the wheel).
 
-[unreleased]: https://github.com/twedl/microtrade/compare/v0.1.0...HEAD
+[unreleased]: https://github.com/twedl/microtrade/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/twedl/microtrade/releases/tag/v0.1.1
 [0.1.0]: https://github.com/twedl/microtrade/releases/tag/v0.1.0
