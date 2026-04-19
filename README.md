@@ -3,11 +3,17 @@
 Turn monthly drops of zipped fixed-width (FWF) trade microdata into
 Hive-partitioned Parquet datasets, one per trade type.
 
-`microtrade` streams each raw `<trade_type>_<YYYYMM>.zip` directly from its zip
-archive (no extraction, bounded memory), slices columns according to a
-versioned YAML spec, and writes `year=YYYY/month=MM/part-0.parquet` atomically
-under a per-type dataset root. Monthly runs reprocess all months YTD of the
-current year; prior years are frozen.
+`microtrade` streams each raw zip directly from its archive (no extraction,
+bounded memory), slices columns according to a versioned YAML spec, and writes
+`year=YYYY/month=MM/part-0.parquet` atomically under a per-type dataset root.
+Monthly runs reprocess all months YTD of the current year; prior years are
+frozen.
+
+Raw filenames don't have to follow any fixed convention — each committed spec
+carries its own `filename_pattern` regex, so workbooks from different upstream
+generations (`SHEET002_202404N.TXT.zip`, `XYZ12345_Im202404.zip`, etc.) can
+coexist as long as each pattern captures `year` and `month` (and optionally
+`flag`) from the filename.
 
 Three trade types are supported, each with its own distinct schema:
 
@@ -31,28 +37,63 @@ This resolves and installs runtime + dev dependencies into `.venv/` based on
 
 ## Usage
 
-### Import the schema workbook (once per schema version)
+### Write a project config (`microtrade.yaml`)
 
-The authoritative schema lives in an Excel workbook. Sheets are mapped
-**positionally**: the first sheet becomes `imports`, the second `exports_us`,
-the third `exports_nonus` (sheet names are ignored). Each sheet's field table
-is autodetected by looking for a row containing `Position`, `Description`,
-`Length`, and `Type`; rows with `Description = Blank` are FWF padding and are
-skipped. See `examples/microdata-layout.xls` for a reference workbook with the
-expected shape.
+The authoritative schema lives in an Excel workbook, but the **wiring**
+between workbooks, trade types, period windows, and raw filenames lives in
+a project config. `microtrade import-spec` reads it to produce each YAML
+spec; the ingest pipeline never touches this file.
 
-Convert the workbook to versioned YAML specs under `src/microtrade/specs/`:
+```yaml
+# microtrade.yaml
+workbooks:
+  XYZ12345_Record_Layout.xls:
+    workbook_id: XYZ12345         # optional; defaults to filename prefix
+    effective_from: 2020-01
+    effective_to: 2023-12         # optional; absent = open-ended
+    sheets:
+      Imports:
+        trade_type: imports       # optional; defaults to positional (sheet index -> TRADE_TYPES)
+        filename_pattern: '^XYZ12345_Im(?P<year>\d{4})(?P<month>\d{2})\.zip$'
 
-```sh
-uv run microtrade import-spec examples/microdata-layout.xls \
-    --effective-from 2020-01
+  Schedule_Record_Layout_2024.xlsx:
+    effective_from: 2024-01
+    sheets:
+      Imports:
+        trade_type: imports
+        filename_pattern: '^IMP_(?P<year>\d{4})(?P<month>\d{2})(?P<flag>[NC])\.TXT\.zip$'
+      ExportsUS:
+        trade_type: exports_us
+        filename_pattern: '^EXUS_(?P<year>\d{4})(?P<month>\d{2})(?P<flag>[NC])\.TXT\.zip$'
+      ExportsNonUS:
+        trade_type: exports_nonus
+        filename_pattern: '^EXNONUS_(?P<year>\d{4})(?P<month>\d{2})(?P<flag>[NC])\.TXT\.zip$'
 ```
 
-The resulting YAML files are the runtime contract — review and commit them.
-Re-run with `--force` to replace an existing version. When a workbook changes,
-run again with a later `--effective-from`; the pipeline picks the appropriate
-spec per period automatically, and a column-level diff against the previous
-version is printed.
+Required regex groups: `year` (4 digits) and `month` (2 digits). Optional:
+`flag` — when upstream publishes both `N` and `C` copies of the same period,
+`N` wins at discovery time.
+
+### Import the schema workbook (once per schema version)
+
+Each sheet's field table is autodetected by looking for a row containing
+`Position`, `Description`, `Length`, and `Type`; rows with `Description =
+Blank` are FWF padding and are skipped.
+
+Convert a workbook to versioned YAML specs:
+
+```sh
+uv run microtrade import-spec XYZ12345_Record_Layout.xls
+```
+
+The importer looks up the workbook in `microtrade.yaml` (override location
+with `--config PATH`) and writes one YAML per trade type under
+`src/microtrade/specs/<trade_type>/v<effective_from>.yaml`. Each file is a
+self-contained runtime contract — review and commit. Re-run with `--force`
+to replace an existing version. When a new workbook lands, add a second
+entry to the config with its own period window; the pipeline picks the
+appropriate spec per period automatically, and a column-level diff against
+the previous version is printed.
 
 ### Ingest raw monthly zips
 
@@ -61,6 +102,13 @@ uv run microtrade ingest \
     --input  /path/to/raw_zips   \
     --output /path/to/datasets
 ```
+
+Discovery walks every committed spec's `filename_pattern` and routes each
+file to the spec that matches; files that match nothing are silently
+ignored, and files that match more than one spec raise (ambiguous
+config — tighten the regexes). `microtrade.yaml` is *not* consulted at
+ingest time; everything the pipeline needs is already baked into the YAML
+specs.
 
 Defaults: year-to-date of the current calendar year, all three trade types,
 zstd-compressed Parquet. Common flags:
@@ -117,8 +165,10 @@ SELECT * FROM read_parquet('output/imports/**/*.parquet', hive_partitioning=1);
 ## Architecture
 
 ```
-discover.scan(input_dir)       -> list[RawInput(trade_type, year, month, path)]
-schema.resolve(specs, period)  -> Spec effective for that period
+config.load_config(yaml)       -> ProjectConfig (import-spec only)
+excel_spec.read_workbook       -> Spec per sheet, with filename_pattern baked in
+discover.scan(input_dir)       -> list[RawInput] (by matching each committed pattern)
+schema.resolve(specs, period)  -> Spec whose [effective_from, effective_to] contains period
 ingest.iter_record_batches     -> pyarrow.RecordBatch stream (bounded memory)
 write.PartitionWriter          -> year=/month=/part-0.parquet.tmp, atomic rename
 pipeline.run                   -> orchestrates the above + JSONL manifest
@@ -126,15 +176,17 @@ pipeline.run                   -> orchestrates the above + JSONL manifest
 
 Key invariants:
 
-- Excel is the upstream source of truth; committed YAML under
-  `src/microtrade/specs/` is the runtime contract. The pipeline never reads
-  Excel at runtime.
+- Excel + `microtrade.yaml` are the upstream source of truth; committed YAML
+  under `src/microtrade/specs/` is the runtime contract. The pipeline never
+  reads Excel, and consults the project config only via `import-spec`.
 - Each partition write is idempotent: re-running YTD cleanly replaces the
   current year's partitions, leaving prior years untouched.
 - The zip is decompressed on the fly via `zipfile.ZipFile.open()`; the raw FWF
   is never extracted to disk and never fully materialized in memory.
 - Per-partition failures are recorded in the manifest but do not abort the run
   - one bad month will not block the rest.
+- `validate-specs` flags overlapping or gapped `[effective_from, effective_to]`
+  windows so silent ambiguities in `schema.resolve` don't reach production.
 
 ## Development
 
@@ -153,14 +205,16 @@ code paths match the real production workflow end-to-end.
 
 ## Status
 
-The pipeline is feature-complete: scaffolding, Excel → YAML, discover + ingest
-+ write, and the orchestrated CLI subcommands (`ingest`, `import-spec`,
-`inspect`, `validate-specs`) are all landed and covered. Reference YAML
-specs generated from `examples/microdata-layout.xls` ship under
-`src/microtrade/specs/`; replace them by running `microtrade import-spec`
-against the real schema workbook (typically with a later `--effective-from`,
-which preserves the historical layouts). Run `microtrade validate-specs`
-after importing to catch dtype conflicts between versions.
+The pipeline is feature-complete: scaffolding, project config, Excel → YAML,
+discover + ingest + write, and the orchestrated CLI subcommands (`ingest`,
+`import-spec`, `inspect`, `validate-specs`) are all landed and covered.
+Reference YAML specs ship under `src/microtrade/specs/` but predate the
+`filename_pattern` field (tracked in issue #16) — replace them by writing a
+`microtrade.yaml` and running `microtrade import-spec` against the real
+schema workbook. A new workbook goes into the config as a second entry with
+its own `effective_from`/`effective_to`; the pipeline picks the right spec
+per period automatically. Run `microtrade validate-specs` after importing to
+catch dtype conflicts and window overlaps/gaps between versions.
 
 ## License
 
