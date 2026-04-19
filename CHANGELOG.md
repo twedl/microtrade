@@ -6,6 +6,21 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-04-19
+
+### Changed
+
+- **Breaking:** default `--spec-dir` / `--out` paths are now `./specs`
+  (cwd-relative) instead of the installed package's directory. This
+  prevents `import-spec` from trying to write into
+  `site-packages/microtrade/specs/` and `validate-specs` from silently
+  reading the bundled examples, which closes [issue #16].
+- Stopped shipping `src/microtrade/specs/` inside the wheel and sdist.
+  The directory remains in-repo as test fixtures / starting examples;
+  installed users produce their own specs via `microtrade import-spec`.
+
+[issue #16]: https://github.com/twedl/microtrade/issues/16
+
 ## [0.1.1] - 2026-04-19
 
 Moves discovery configuration into a user-supplied project YAML so raw
@@ -118,6 +133,7 @@ and CLI command stay `microtrade`.
   `inspect`) ship implemented; the package is fully typed (`py.typed`
   marker included in the wheel).
 
-[unreleased]: https://github.com/twedl/microtrade/compare/v0.1.1...HEAD
+[unreleased]: https://github.com/twedl/microtrade/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/twedl/microtrade/releases/tag/v0.1.2
 [0.1.1]: https://github.com/twedl/microtrade/releases/tag/v0.1.1
 [0.1.0]: https://github.com/twedl/microtrade/releases/tag/v0.1.0

@@ -1,6 +1,6 @@
 [project]
 name = "microtrade-fwf"
-version = "0.1.1"
+version = "0.1.2"
 description = "Turn zipped fixed-width (FWF) trade microdata into Hive-partitioned Parquet datasets."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -54,6 +54,14 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/microtrade"]
+# Reference YAML specs are committed at `src/microtrade/specs/` for use as
+# test fixtures and as starting-point examples in-repo. They are not the
+# runtime contract for installed users (each consumer writes their own via
+# `microtrade import-spec`), so keep them out of the wheel.
+exclude = ["src/microtrade/specs"]
+
+[tool.hatch.build.targets.sdist]
+exclude = ["src/microtrade/specs"]
 
 [dependency-groups]
 dev = [

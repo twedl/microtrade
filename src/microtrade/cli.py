@@ -27,7 +27,7 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
-DEFAULT_SPEC_DIR = Path(__file__).parent / "specs"
+DEFAULT_SPEC_DIR = Path("specs")
 
 
 @app.command()
