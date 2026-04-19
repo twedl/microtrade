@@ -6,6 +6,32 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `microtrade import-spec` now takes a variadic list of workbook paths,
+  so shell globs work naturally (`microtrade import-spec raw/*.xls`).
+  Each workbook must have a matching entry in the project config.
+  Per-workbook failures are reported at the end; the command exits 1
+  if any workbook failed to import.
+
+### Changed
+
+- **Breaking:** `--encoding` default is now `cp1252` (Windows-1252) for
+  both `microtrade ingest` and `microtrade inspect`. Most government
+  trade drops originate on Windows and ship in cp1252; users whose
+  upstream is UTF-8 should pass `--encoding utf-8` explicitly.
+
+### Fixed
+
+- `microtrade inspect`'s decode-error message now points at the
+  `--encoding` flag so the fix isn't buried in `--help`.
+- `import-spec` now honors trailing "sentinel" rows in the record-layout
+  sheet that declare a `Position` without a `Length`. The parser used to
+  silently drop them, which truncated `record_length` by the trailing
+  filler bytes the sentinel was meant to cover; ingest then failed with
+  `expected record_length N, got N+1` on the real data. The row's
+  `Position` is now treated as the last byte of the record.
+
 ## [0.1.2] - 2026-04-19
 
 ### Changed

@@ -121,7 +121,7 @@ zstd-compressed Parquet. Common flags:
 | `--all` | off | Process every year present under `--input` |
 | `--chunk-rows 250000` | 250000 | Rows per Parquet row group / memory batch |
 | `--compression zstd` | zstd | Parquet compression codec |
-| `--encoding utf-8` | utf-8 | Text encoding of the inner FWF |
+| `--encoding cp1252` | cp1252 | Text encoding of the inner FWF (pass `--encoding utf-8` for UTF-8 data) |
 
 Per-partition outcomes are logged as JSON lines under
 `<output>/_manifests/<trade_type>/<run_id>.jsonl`, and a one-line summary is

@@ -202,6 +202,18 @@ def _sheet_to_layout(df: pl.DataFrame, sheet: str) -> tuple[tuple[Column, ...], 
         # Position; skip them quietly so layouts can carry trailing notes.
         try:
             start = _cell_int(row[idx.position], field="position")
+        except SpecError:
+            continue
+
+        # Sentinel row: Position parses but Length is blank. Workbook authors
+        # use this to mark "the record extends to byte N"; treat Position as
+        # the last byte so record_length picks up trailing filler the schema
+        # sheet would otherwise drop.
+        if _cell_str(row[idx.length]) == "":
+            max_end = max(max_end, start)
+            continue
+
+        try:
             length = _cell_int(row[idx.length], field="length")
         except SpecError:
             continue

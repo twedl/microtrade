@@ -13,6 +13,7 @@ from microtrade.config import WorkbookConfig, load_config
 from microtrade.excel_spec import derive_workbook_id, normalize_dtype, read_workbook
 from microtrade.schema import TRADE_TYPES, SpecError, load_spec
 from tests._helpers import (
+    SHEET_TITLES,
     build_project_config,
     build_workbook,
     default_filename_pattern,
@@ -111,6 +112,40 @@ def test_read_workbook_skips_blank_filler_rows(tmp_path: Path) -> None:
     assert [c.name for c in imports.columns] == ["code", "value"]
     assert [c.dtype for c in imports.columns] == ["Utf8", "Int64"]
     assert imports.record_length == 19
+
+
+def test_read_workbook_honors_position_only_sentinel_row(tmp_path: Path) -> None:
+    """A trailing row with Position but no Length marks the end of the record;
+    record_length must grow to include that position even though the row
+    contributes no real column."""
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    wb.remove(wb.active)
+    sheet_title = "ImportsSheet"
+    ws = wb.create_sheet(sheet_title)
+    ws.append(["Position", "Description", "Length", "Type"])
+    ws.append([1, "code", 5, "Char"])
+    ws.append([6, "value", 10, "Num"])
+    # Rightmost real column ends at byte 15; sentinel says the record actually
+    # extends to byte 16 (an upstream trailing-space filler the workbook
+    # declares via a position-only row).
+    ws.append([16, None, None, None])
+    wb_path = tmp_path / "wb.xlsx"
+    wb.save(wb_path)
+
+    config_path = build_project_config(
+        tmp_path / "microtrade.yaml",
+        wb_path,
+        "2024-01",
+        sheet_titles={"imports": sheet_title},
+    )
+    workbook_config = load_config(config_path).get_workbook(wb_path)
+
+    specs = read_workbook(wb_path, workbook_config)
+    imports = specs["imports"]
+    assert [c.name for c in imports.columns] == ["code", "value"]
+    assert imports.record_length == 16
 
 
 def test_read_workbook_bakes_effective_to(tmp_path: Path) -> None:
@@ -227,8 +262,91 @@ def test_import_spec_cli_errors_when_workbook_missing_from_config(
     out_dir = tmp_path / "specs"
 
     result = _invoke_import(CliRunner(), schema_workbook, config_path, out_dir)
-    assert result.exit_code == 2
+    # Per-workbook failure -> exit 1 (aggregated), not 2 (config-level error).
+    assert result.exit_code == 1
     assert "not listed in the project config" in result.output
+    assert "1 of 1 workbook(s) failed" in result.output
+
+
+def test_import_spec_cli_accepts_multiple_workbooks(tmp_path: Path) -> None:
+    """Variadic: glob-style multi-workbook import. Each workbook must have a
+    matching entry in the shared microtrade.yaml."""
+    import yaml as yaml_
+
+    wb_a = build_workbook(tmp_path / "first.xlsx")
+    wb_b = build_workbook(tmp_path / "second.xlsx")
+    out_dir = tmp_path / "specs"
+
+    # Shared config: distinct effective_from per workbook so both land.
+    cfg = {
+        "workbooks": {
+            "first.xlsx": {
+                "effective_from": "2020-01",
+                "effective_to": "2022-12",
+                "sheets": {
+                    title: {
+                        "trade_type": tt,
+                        "filename_pattern": default_filename_pattern(title),
+                    }
+                    for tt, title in SHEET_TITLES.items()
+                },
+            },
+            "second.xlsx": {
+                "effective_from": "2023-01",
+                "sheets": {
+                    title: {
+                        "trade_type": tt,
+                        "filename_pattern": default_filename_pattern(title),
+                    }
+                    for tt, title in SHEET_TITLES.items()
+                },
+            },
+        }
+    }
+    config_path = tmp_path / "microtrade.yaml"
+    config_path.write_text(yaml_.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "import-spec",
+            str(wb_a),
+            str(wb_b),
+            "--config",
+            str(config_path),
+            "--out",
+            str(out_dir),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    # Both effective_from folders exist per trade type.
+    for trade_type in TRADE_TYPES:
+        for effective in ("2020-01", "2023-01"):
+            assert (out_dir / trade_type / f"v{effective}.yaml").exists()
+
+
+def test_import_spec_cli_aggregates_failures(schema_workbook: Path, tmp_path: Path) -> None:
+    """A bad workbook in the batch doesn't halt the others; command exits 1 at the end."""
+    bogus = build_workbook(tmp_path / "bogus.xlsx")
+    config_path = build_project_config(tmp_path / "microtrade.yaml", schema_workbook, "2020-01")
+    out_dir = tmp_path / "specs"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "import-spec",
+            str(schema_workbook),  # listed in config -> succeeds
+            str(bogus),  # not listed -> fails
+            "--config",
+            str(config_path),
+            "--out",
+            str(out_dir),
+        ],
+    )
+    assert result.exit_code == 1
+    assert (out_dir / "imports" / "v2020-01.yaml").exists()  # first workbook wrote specs
+    assert "1 of 2 workbook(s) failed" in result.output
 
 
 # --- validate-specs ---------------------------------------------------------

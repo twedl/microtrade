@@ -201,7 +201,8 @@ def test_inspect_rows_zero_prints_spec_only(inspect_env) -> None:
 
 
 def test_inspect_reports_decode_error(inspect_env, tmp_path: Path) -> None:
-    """Non-UTF-8 bytes in a plain FWF exit cleanly rather than dumping a traceback."""
+    """Non-UTF-8 bytes in a plain FWF exit cleanly rather than dumping a traceback,
+    and the error message points at the `--encoding` flag."""
     bad_fwf = tmp_path / "imports.fwf"
     bad_fwf.write_bytes(b"\xff\xfe\xfd invalid bytes for utf-8\n")
 
@@ -217,7 +218,10 @@ def test_inspect_reports_decode_error(inspect_env, tmp_path: Path) -> None:
             "2024-01",
             "--rows",
             "1",
+            "--encoding",
+            "utf-8",
         ]
     )
     assert result.exit_code == 2
     assert "decode" in result.output.lower()
+    assert "--encoding" in result.output

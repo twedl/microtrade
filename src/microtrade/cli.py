@@ -75,7 +75,13 @@ def ingest(
         help="Rows per streaming RecordBatch / Parquet row group.",
     ),
     compression: str = typer.Option("zstd", "--compression"),
-    encoding: str = typer.Option("utf-8", "--encoding"),
+    encoding: str = typer.Option(
+        "cp1252",
+        "--encoding",
+        help="Text encoding of the inner FWF. Defaults to cp1252 (Windows-1252), "
+        "the codec used by most government trade drops; pass --encoding utf-8 "
+        "if your upstream ships UTF-8.",
+    ),
     max_quality_issues: int = typer.Option(
         pipeline.DEFAULT_MAX_QUALITY_ISSUES,
         "--max-quality-issues",
@@ -121,11 +127,11 @@ def ingest(
 
 @app.command("import-spec")
 def import_spec(
-    workbook: Path = typer.Argument(..., exists=True, dir_okay=False),
+    workbooks: list[Path] = typer.Argument(..., exists=True, dir_okay=False),
     config_path: Path = typer.Option(
         config.DEFAULT_CONFIG_PATH,
         "--config",
-        help="Path to the project config (YAML) listing this workbook and its sheets.",
+        help="Path to the project config (YAML) listing these workbooks.",
     ),
     out: Path = typer.Option(
         DEFAULT_SPEC_DIR, "--out", help="Directory to write per-trade-type YAML specs into."
@@ -134,19 +140,40 @@ def import_spec(
         False, "--force", help="Overwrite existing YAML at the target path."
     ),
 ) -> None:
-    """Convert a schema Excel workbook into versioned YAML specs.
+    """Convert one or more schema Excel workbooks into versioned YAML specs.
 
-    The project config (default `microtrade.yaml` in the working directory)
-    supplies the workbook's `effective_from` / `effective_to` window,
-    `workbook_id`, and per-sheet `filename_pattern`. See `microtrade.config`.
+    Accepts a list of workbook paths so shell globs work naturally
+    (`microtrade import-spec raw/*.xls`). Each workbook must have a
+    matching entry in the project config (default `microtrade.yaml`)
+    that supplies its `effective_from` / `effective_to` window,
+    `workbook_id`, and per-sheet `filename_pattern`. Per-workbook
+    failures are reported at the end; the command exits 1 if any
+    workbook failed to import.
     """
     try:
         project_config = config.load_config(config_path)
-        workbook_config = project_config.get_workbook(workbook)
     except config.ConfigError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
 
+    failures: list[tuple[Path, str]] = []
+    for workbook in workbooks:
+        try:
+            _import_one_workbook(workbook, project_config, out=out, force=force)
+        except (config.ConfigError, schema.SpecError) as exc:
+            typer.echo(f"{workbook.name}: {exc}", err=True)
+            failures.append((workbook, f"{type(exc).__name__}: {exc}"))
+
+    if failures:
+        typer.echo("", err=True)
+        typer.echo(f"FAIL: {len(failures)} of {len(workbooks)} workbook(s) failed", err=True)
+        raise typer.Exit(code=1)
+
+
+def _import_one_workbook(
+    workbook: Path, project_config: config.ProjectConfig, *, out: Path, force: bool
+) -> None:
+    workbook_config = project_config.get_workbook(workbook)
     specs = excel_spec.read_workbook(workbook, workbook_config)
     effective_from = workbook_config.effective_from
     for trade_type, spec in specs.items():
@@ -273,7 +300,12 @@ def inspect(
     raw: bool = typer.Option(
         False, "--raw", help="Print full lines without per-column annotation."
     ),
-    encoding: str = typer.Option("utf-8", "--encoding"),
+    encoding: str = typer.Option(
+        "cp1252",
+        "--encoding",
+        help="Text encoding of the inner FWF. Defaults to cp1252 (Windows-1252); "
+        "pass --encoding utf-8 for UTF-8 data.",
+    ),
 ) -> None:
     """Dump the resolved spec and first rows of a raw trade file.
 
@@ -354,7 +386,9 @@ def _iter_inspect_lines(path: Path, *, encoding: str, limit: int) -> Iterator[tu
         raise typer.Exit(code=2) from exc
     except UnicodeDecodeError as exc:
         typer.echo(
-            f"{path.name}: cannot decode as {encoding} at byte {exc.start}: {exc.reason}",
+            f"{path.name}: cannot decode as {encoding} at byte {exc.start}: {exc.reason}. "
+            f"Pass --encoding to try a different codec (e.g. --encoding latin-1 or "
+            f"--encoding utf-8).",
             err=True,
         )
         raise typer.Exit(code=2) from exc
