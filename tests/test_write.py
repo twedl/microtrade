@@ -17,8 +17,8 @@ from tests._helpers import make_zip_input, render_fwf_lines
 
 
 @pytest.fixture
-def imports_spec(schema_workbook: Path):
-    return read_workbook(schema_workbook, "2024-01")["imports"]
+def imports_spec(schema_workbook: Path, workbook_config):
+    return read_workbook(schema_workbook, workbook_config)["imports"]
 
 
 def _write_fixture_zip(tmp_path: Path, spec, n_rows: int = 10, month: int = 4) -> RawInput:

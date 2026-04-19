@@ -15,7 +15,8 @@ from typer.testing import CliRunner
 
 from microtrade import excel_spec, schema
 from microtrade.cli import app
-from tests._helpers import build_workbook, make_zip_input, render_fwf_lines
+from microtrade.config import load_config
+from tests._helpers import build_project_config, build_workbook, make_zip_input, render_fwf_lines
 
 
 @pytest.fixture
@@ -26,14 +27,16 @@ def inspect_env(tmp_path: Path) -> dict[str, Path]:
     input_dir.mkdir()
     workbook_path = tmp_path / "schema_workbook.xlsx"
     build_workbook(workbook_path)
+    cfg_path = build_project_config(tmp_path / "microtrade.yaml", workbook_path, "2020-01")
+    workbook_config = load_config(cfg_path).get_workbook(workbook_path)
 
-    specs = excel_spec.read_workbook(workbook_path, "2020-01")
+    specs = excel_spec.read_workbook(workbook_path, workbook_config)
     for trade_type, spec in specs.items():
         schema.save_spec(spec, spec_dir / trade_type / "v2020-01.yaml")
 
     imports_spec = specs["imports"]
     lines = render_fwf_lines(imports_spec, n_rows=5, seed=0)
-    zip_path = make_zip_input(input_dir / "imports_202401.zip", lines)
+    zip_path = make_zip_input(input_dir / "ImportsSheet_202401N.TXT.zip", lines)
 
     return {"tmp": tmp_path, "spec": spec_dir, "input": input_dir, "zip": zip_path}
 
@@ -76,7 +79,9 @@ def test_inspect_raw_skips_annotation(inspect_env) -> None:
 
 def test_inspect_accepts_plain_fwf_with_overrides(inspect_env, tmp_path: Path) -> None:
     workbook = inspect_env["tmp"] / "schema_workbook.xlsx"
-    imports_spec = excel_spec.read_workbook(workbook, "2020-01")["imports"]
+    cfg_path = build_project_config(tmp_path / "cfg.yaml", workbook, "2020-01")
+    workbook_config = load_config(cfg_path).get_workbook(workbook)
+    imports_spec = excel_spec.read_workbook(workbook, workbook_config)["imports"]
     lines = render_fwf_lines(imports_spec, n_rows=2, seed=0)
     fwf_path = tmp_path / "imports.fwf"
     fwf_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -113,7 +118,26 @@ def test_inspect_errors_when_no_spec(inspect_env) -> None:
     for yaml_file in (inspect_env["spec"] / "imports").rglob("*.yaml"):
         yaml_file.unlink()
 
+    # With imports' spec gone, the ImportsSheet prefix has no mapping, so the
+    # filename can't resolve to a (trade_type, period) pair without --type/--period.
     result = _invoke(["inspect", str(inspect_env["zip"]), "--spec-dir", str(inspect_env["spec"])])
+    assert result.exit_code == 2
+    assert "filename does not match" in result.output
+
+    # With explicit overrides, the resolution path reaches `load_all` and
+    # surfaces the missing-spec condition cleanly.
+    result = _invoke(
+        [
+            "inspect",
+            str(inspect_env["zip"]),
+            "--spec-dir",
+            str(inspect_env["spec"]),
+            "--type",
+            "imports",
+            "--period",
+            "2024-01",
+        ]
+    )
     assert result.exit_code == 2
     assert "no specs found" in result.output
 
@@ -149,7 +173,7 @@ def test_inspect_rejects_malformed_period_override(inspect_env) -> None:
 
 
 def test_inspect_rejects_zip_with_multiple_members(inspect_env, tmp_path: Path) -> None:
-    bad_zip = tmp_path / "imports_202401.zip"
+    bad_zip = tmp_path / "ImportsSheet_202401N.TXT.zip"
     with zipfile.ZipFile(bad_zip, "w") as zf:
         zf.writestr("a.fwf", "first\n")
         zf.writestr("b.fwf", "second\n")

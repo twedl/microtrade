@@ -19,7 +19,6 @@ import zipfile
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import IO
 
 import pyarrow as pa
@@ -284,26 +283,3 @@ def _build_batch(
 def _row_msg(raw: RawInput, line_no: int, column: str | None, detail: str) -> str:
     col_part = f" column {column!r}" if column is not None else ""
     return f"{raw.path.name} line {line_no}{col_part}: {detail}"
-
-
-def iter_record_batches_from_path(
-    path: Path,
-    spec: Spec,
-    *,
-    chunk_rows: int = DEFAULT_CHUNK_ROWS,
-    encoding: str = "utf-8",
-    on_quality_issue: QualityIssueSink | None = None,
-) -> Iterator[pa.RecordBatch]:
-    """Convenience wrapper for tests: parse the filename to a RawInput then ingest."""
-    from microtrade.discover import parse_filename
-
-    raw = parse_filename(path)
-    if raw is None:
-        raise IngestError(f"{path.name}: filename does not match the expected pattern")
-    yield from iter_record_batches(
-        raw,
-        spec,
-        chunk_rows=chunk_rows,
-        encoding=encoding,
-        on_quality_issue=on_quality_issue,
-    )

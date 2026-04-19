@@ -16,7 +16,29 @@ from typer.testing import CliRunner
 
 from microtrade import excel_spec, pipeline, schema
 from microtrade.cli import app
-from tests._helpers import build_workbook, make_zip_input, render_fwf_lines
+from microtrade.config import load_config
+from tests._helpers import (
+    SHEET_TITLES,
+    build_project_config,
+    build_workbook,
+    input_filename,
+    make_zip_input,
+    render_fwf_lines,
+)
+
+SHEET_FOR_TRADE_TYPE: dict[str, str] = SHEET_TITLES
+
+
+def _input_filename(trade_type: str, year: int, month: int, flag: str = "N") -> str:
+    return input_filename(SHEET_FOR_TRADE_TYPE[trade_type], year, month, flag)
+
+
+def _workbook_config(tmp_path: Path, workbook: Path, effective_from: str, **kwargs):
+    """Build a microtrade.yaml next to `workbook` and return its WorkbookConfig."""
+    cfg_path = build_project_config(
+        tmp_path / f"config_{effective_from}.yaml", workbook, effective_from, **kwargs
+    )
+    return load_config(cfg_path).get_workbook(workbook)
 
 
 @pytest.fixture
@@ -32,7 +54,8 @@ def prepared_env(tmp_path: Path) -> dict[str, Path]:
 
     # Generate and commit YAML specs covering everything 2020+, so a 2023 input
     # is still processable when YTD is disabled.
-    specs_by_type = excel_spec.read_workbook(workbook_path, "2020-01")
+    workbook_cfg = _workbook_config(tmp_path, workbook_path, "2020-01")
+    specs_by_type = excel_spec.read_workbook(workbook_path, workbook_cfg)
     for trade_type, spec in specs_by_type.items():
         schema.save_spec(spec, spec_dir / trade_type / "v2020-01.yaml")
 
@@ -41,7 +64,7 @@ def prepared_env(tmp_path: Path) -> dict[str, Path]:
     for trade_type, spec in specs_by_type.items():
         for year, month in [(2024, 1), (2024, 2), (2023, 12)]:
             lines = render_fwf_lines(spec, n_rows=rows_per_month[trade_type], seed=month)
-            make_zip_input(input_dir / f"{trade_type}_{year}{month:02d}.zip", lines)
+            make_zip_input(input_dir / _input_filename(trade_type, year, month), lines)
 
     return {
         "tmp": tmp_path,
@@ -161,9 +184,12 @@ def test_pipeline_records_failure_and_continues(prepared_env) -> None:
     # Corrupt one imports zip with a truncated (wrong-length) line - that's a
     # structural error that still fails the whole partition, unlike row-level
     # parse errors which are routed to the quality-issues log.
-    target = env["input"] / "imports_202401.zip"
+    target = env["input"] / _input_filename("imports", 2024, 1)
     target.unlink()
-    spec = excel_spec.read_workbook(env["tmp"] / "schema_workbook.xlsx", "2020-01")["imports"]
+    workbook = env["tmp"] / "schema_workbook.xlsx"
+    spec = excel_spec.read_workbook(workbook, _workbook_config(env["tmp"], workbook, "2020-01"))[
+        "imports"
+    ]
     good = render_fwf_lines(spec, n_rows=3, seed=0)
     make_zip_input(target, [good[0], good[1][:-5]])
 
@@ -191,9 +217,12 @@ def test_pipeline_row_level_error_logged_to_quality_issues(prepared_env) -> None
     partition still writes successfully for the remaining rows."""
     env = prepared_env
 
-    target = env["input"] / "imports_202401.zip"
+    target = env["input"] / _input_filename("imports", 2024, 1)
     target.unlink()
-    spec = excel_spec.read_workbook(env["tmp"] / "schema_workbook.xlsx", "2020-01")["imports"]
+    workbook = env["tmp"] / "schema_workbook.xlsx"
+    spec = excel_spec.read_workbook(workbook, _workbook_config(env["tmp"], workbook, "2020-01"))[
+        "imports"
+    ]
     good = render_fwf_lines(spec, n_rows=3, seed=0)
     col = {c.name: c for c in spec.columns}["value_usd"]
     bad_line = good[0][: col.start - 1] + "ABCDEABCDEABCDE" + good[0][col.start - 1 + col.length :]
@@ -220,9 +249,12 @@ def test_pipeline_row_level_error_logged_to_quality_issues(prepared_env) -> None
 def _make_bad_imports_zip(env: dict[str, Path], n_good: int, n_bad: int) -> Path:
     """Replace the 2024-01 imports zip with `n_good` valid rows and `n_bad`
     rows that have garbage bytes in the non-nullable `value_usd` column."""
-    target = env["input"] / "imports_202401.zip"
+    target = env["input"] / _input_filename("imports", 2024, 1)
     target.unlink()
-    spec = excel_spec.read_workbook(env["tmp"] / "schema_workbook.xlsx", "2020-01")["imports"]
+    workbook = env["tmp"] / "schema_workbook.xlsx"
+    spec = excel_spec.read_workbook(workbook, _workbook_config(env["tmp"], workbook, "2020-01"))[
+        "imports"
+    ]
     col = {c.name: c for c in spec.columns}["value_usd"]
     good = render_fwf_lines(spec, n_rows=n_good + n_bad, seed=0)
     lines = list(good[:n_good])
@@ -314,22 +346,24 @@ def test_pipeline_writes_canonical_dataset_schema(prepared_env) -> None:
 
 
 def test_pipeline_missing_spec_is_recorded_as_failure(tmp_path: Path) -> None:
-    """A raw zip whose trade_type has no YAML spec fails cleanly, not crashes."""
+    """A raw zip whose period predates every committed spec fails cleanly,
+    not crashes. (Files whose sheet has no spec at all are silently skipped
+    by discover - that's covered by the discover tests.)"""
     input_dir = tmp_path / "input"
     output_dir = tmp_path / "output"
     spec_dir = tmp_path / "specs"
     input_dir.mkdir()
     spec_dir.mkdir()
 
-    # Build a workbook + spec only for exports_us, then drop a raw imports zip.
+    # Spec only kicks in from 2025-01, so a 2024-04 input has no applicable spec.
     workbook = tmp_path / "wb.xlsx"
     build_workbook(workbook)
-    specs = excel_spec.read_workbook(workbook, "2024-01")
-    schema.save_spec(specs["exports_us"], spec_dir / "exports_us" / "v2024-01.yaml")
+    specs = excel_spec.read_workbook(workbook, _workbook_config(tmp_path, workbook, "2025-01"))
+    schema.save_spec(specs["imports"], spec_dir / "imports" / "v2025-01.yaml")
 
     imports_spec = specs["imports"]
     lines = render_fwf_lines(imports_spec, n_rows=1, seed=0)
-    make_zip_input(input_dir / "imports_202404.zip", lines)
+    make_zip_input(input_dir / _input_filename("imports", 2024, 4), lines)
 
     summary = pipeline.run(
         pipeline.PipelineConfig(
@@ -342,7 +376,7 @@ def test_pipeline_missing_spec_is_recorded_as_failure(tmp_path: Path) -> None:
         )
     )
     assert summary.failed_count == 1
-    assert "no specs found" in (summary.results[0].error or "")
+    assert "no spec applies" in (summary.results[0].error or "")
 
 
 def test_cli_ingest_end_to_end(prepared_env) -> None:
@@ -376,9 +410,16 @@ def test_cli_ingest_end_to_end(prepared_env) -> None:
 
 def test_cli_ingest_exits_nonzero_on_failure(prepared_env) -> None:
     env = prepared_env
-    # Remove all specs so every partition fails with "no specs found".
+    # Bump every spec's effective_from past the input year so discover still
+    # finds the files (patterns intact) but `resolve` rejects each partition.
+    workbook = env["tmp"] / "schema_workbook.xlsx"
+    future_specs = excel_spec.read_workbook(
+        workbook, _workbook_config(env["tmp"], workbook, "2099-01")
+    )
     for yaml_file in env["spec"].rglob("*.yaml"):
         yaml_file.unlink()
+    for trade_type, spec in future_specs.items():
+        schema.save_spec(spec, env["spec"] / trade_type / "v2099-01.yaml")
 
     result = CliRunner().invoke(
         app,

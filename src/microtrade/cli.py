@@ -18,7 +18,7 @@ from typing import IO
 
 import typer
 
-from microtrade import __version__, discover, excel_spec, pipeline, schema
+from microtrade import __version__, config, discover, excel_spec, pipeline, schema
 from microtrade.ingest import DEFAULT_CHUNK_ROWS
 
 app = typer.Typer(
@@ -122,8 +122,10 @@ def ingest(
 @app.command("import-spec")
 def import_spec(
     workbook: Path = typer.Argument(..., exists=True, dir_okay=False),
-    effective_from: str = typer.Option(
-        ..., "--effective-from", help="YYYY-MM period when this spec becomes active."
+    config_path: Path = typer.Option(
+        config.DEFAULT_CONFIG_PATH,
+        "--config",
+        help="Path to the project config (YAML) listing this workbook and its sheets.",
     ),
     out: Path = typer.Option(
         DEFAULT_SPEC_DIR, "--out", help="Directory to write per-trade-type YAML specs into."
@@ -132,8 +134,21 @@ def import_spec(
         False, "--force", help="Overwrite existing YAML at the target path."
     ),
 ) -> None:
-    """Convert a schema Excel workbook into versioned YAML specs."""
-    specs = excel_spec.read_workbook(workbook, effective_from)
+    """Convert a schema Excel workbook into versioned YAML specs.
+
+    The project config (default `microtrade.yaml` in the working directory)
+    supplies the workbook's `effective_from` / `effective_to` window,
+    `workbook_id`, and per-sheet `filename_pattern`. See `microtrade.config`.
+    """
+    try:
+        project_config = config.load_config(config_path)
+        workbook_config = project_config.get_workbook(workbook)
+    except config.ConfigError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+
+    specs = excel_spec.read_workbook(workbook, workbook_config)
+    effective_from = workbook_config.effective_from
     for trade_type, spec in specs.items():
         target = out / trade_type / f"v{effective_from}.yaml"
         if target.exists() and not force:
@@ -195,12 +210,20 @@ def validate_specs(
         specs.sort(key=lambda s: s.effective_from)
         typer.echo(f"{trade_type}:")
         for i, spec in enumerate(specs):
+            window = (
+                f"{spec.effective_from}..{spec.effective_to}"
+                if spec.effective_to is not None
+                else f"{spec.effective_from}..(open)"
+            )
             typer.echo(
                 f"  v{spec.effective_from}  "
-                f"({len(spec.columns)} columns, record_length={spec.record_length})"
+                f"({len(spec.columns)} columns, record_length={spec.record_length}, "
+                f"window={window})"
             )
             if i > 0:
                 _print_diff(specs[i - 1], schema.diff_specs(specs[i - 1], spec))
+
+        problems.extend(schema.window_problems(trade_type, specs))
 
         try:
             schema.canonical_columns(specs)
@@ -238,13 +261,13 @@ def inspect(
         None,
         "--type",
         help="Trade type override; defaults to parse from filename. "
-        "Required if the filename is not `<trade_type>_<YYYYMM>.zip`.",
+        "Required if the filename is not `<SHEET>_<YYYYMM><N|C>.TXT.zip`.",
     ),
     period: str | None = typer.Option(
         None,
         "--period",
         help="Period (YYYY-MM) override; defaults to parse from filename. "
-        "Required if the filename is not `<trade_type>_<YYYYMM>.zip`.",
+        "Required if the filename is not `<SHEET>_<YYYYMM><N|C>.TXT.zip`.",
     ),
     rows: int = typer.Option(5, "--rows", "-n", help="Number of data rows to show (0 = none)."),
     raw: bool = typer.Option(
@@ -257,7 +280,7 @@ def inspect(
     Accepts either a `<trade_type>_<YYYYMM>.zip` (filename drives spec
     resolution) or a plain FWF file (pass `--type` and `--period`).
     """
-    resolved_type, resolved_period = _resolve_inspect_target(path, trade_type, period)
+    resolved_type, resolved_period = _resolve_inspect_target(path, trade_type, period, spec_dir)
 
     specs = schema.load_all(spec_dir, resolved_type)
     if not specs:
@@ -281,15 +304,17 @@ def inspect(
 
 
 def _resolve_inspect_target(
-    path: Path, trade_type: str | None, period: str | None
+    path: Path, trade_type: str | None, period: str | None, spec_dir: Path
 ) -> tuple[str, str]:
-    parsed = discover.parse_filename(path)
+    patterns = discover.load_patterns(spec_dir)
+    parsed = discover.parse_filename(path, patterns)
     resolved_type = trade_type or (parsed.trade_type if parsed is not None else None)
     resolved_period = period or (parsed.period if parsed is not None else None)
     if resolved_type is None or resolved_period is None:
         typer.echo(
-            f"{path.name}: filename does not match <trade_type>_<YYYYMM>.zip; "
-            f"pass --type and --period to inspect anyway.",
+            f"{path.name}: filename does not match either supported pattern "
+            f"(or its sheet/workbook_id has no spec); pass --type and --period "
+            f"to inspect anyway.",
             err=True,
         )
         raise typer.Exit(code=2)

@@ -132,14 +132,15 @@ def run(config: PipelineConfig) -> RunSummary:
     """Execute the pipeline and return a summary with per-partition results."""
     run_id = _make_run_id()
     started_at = now_iso()
-    raw_inputs = _select_inputs(config)
+    specs_by_type = {t: load_all(config.spec_dir, t) for t in config.trade_types}
+    raw_inputs = _select_inputs(config, specs_by_type)
 
     results: list[PartitionResult] = []
     manifest_paths: dict[str, Path] = {}
     trade_types_seen: set[str] = set()
 
     for raw in raw_inputs:
-        result = _process_one(raw, config, run_id=run_id)
+        result = _process_one(raw, config, specs_by_type, run_id=run_id)
         results.append(result)
         trade_types_seen.add(raw.trade_type)
 
@@ -152,7 +153,7 @@ def run(config: PipelineConfig) -> RunSummary:
     # (or was configured), so consumers of `output/<type>/_dataset_schema.json`
     # always see the union of committed specs after a run.
     for trade_type in sorted(set(config.trade_types) | trade_types_seen):
-        _write_dataset_schema(config.output_dir, config.spec_dir, trade_type)
+        _write_dataset_schema(config.output_dir, trade_type, specs_by_type.get(trade_type, []))
 
     return RunSummary(
         run_id=run_id,
@@ -162,11 +163,15 @@ def run(config: PipelineConfig) -> RunSummary:
     )
 
 
-def _select_inputs(config: PipelineConfig) -> list[RawInput]:
+def _select_inputs(config: PipelineConfig, specs_by_type: dict[str, list[Spec]]) -> list[RawInput]:
     if not config.input_dir.is_dir():
         raise FileNotFoundError(f"input_dir does not exist: {config.input_dir}")
+    patterns = [
+        entry for specs in specs_by_type.values() for entry in discover.patterns_for_specs(specs)
+    ]
     candidates = discover.scan(
         config.input_dir,
+        patterns=patterns,
         trade_types=config.trade_types,
         year=config.year,
         month=config.month,
@@ -182,6 +187,7 @@ def _select_inputs(config: PipelineConfig) -> list[RawInput]:
 def _process_one(
     raw: RawInput,
     config: PipelineConfig,
+    specs_by_type: dict[str, list[Spec]],
     *,
     run_id: str,
 ) -> PartitionResult:
@@ -189,7 +195,7 @@ def _process_one(
     input_sha = _sha256_or_empty(raw.path)
 
     try:
-        spec = _resolve_spec(raw, config.spec_dir)
+        spec = _resolve_spec(raw, specs_by_type, config.spec_dir)
     except (SpecError, FileNotFoundError) as exc:
         return _failure_result(raw, start, input_sha, spec_version=None, output_path="", error=exc)
 
@@ -291,8 +297,8 @@ def _failure_result(
     )
 
 
-def _resolve_spec(raw: RawInput, spec_dir: Path) -> Spec:
-    specs = load_all(spec_dir, raw.trade_type)
+def _resolve_spec(raw: RawInput, specs_by_type: dict[str, list[Spec]], spec_dir: Path) -> Spec:
+    specs = specs_by_type.get(raw.trade_type, [])
     if not specs:
         raise SpecError(f"no specs found for trade_type {raw.trade_type!r} under {spec_dir}")
     return resolve(specs, raw.period)
@@ -339,14 +345,13 @@ def _append_manifest(
     )
 
 
-def _write_dataset_schema(output_dir: Path, spec_dir: Path, trade_type: str) -> None:
-    try:
-        specs = load_all(spec_dir, trade_type)
-    except SpecError:
-        return
+def _write_dataset_schema(output_dir: Path, trade_type: str, specs: list[Spec]) -> None:
     if not specs:
         return
-    cols: tuple[CanonicalColumn, ...] = canonical_columns(specs)
+    try:
+        cols: tuple[CanonicalColumn, ...] = canonical_columns(specs)
+    except SpecError:
+        return
     target = output_dir / trade_type / "_dataset_schema.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     payload = {

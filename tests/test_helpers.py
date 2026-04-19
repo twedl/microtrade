@@ -9,14 +9,15 @@ from __future__ import annotations
 import zipfile
 from pathlib import Path
 
+from microtrade.discover import RawInput
 from microtrade.excel_spec import read_workbook
-from microtrade.ingest import QualityIssue, iter_record_batches_from_path
+from microtrade.ingest import QualityIssue, iter_record_batches
 from microtrade.schema import Column, Spec, load_all
 from tests._helpers import make_zip_input, render_fwf_lines
 
 
-def test_render_fwf_lines_produces_fixed_width(schema_workbook: Path) -> None:
-    specs = read_workbook(schema_workbook, "2024-01")
+def test_render_fwf_lines_produces_fixed_width(schema_workbook: Path, workbook_config) -> None:
+    specs = read_workbook(schema_workbook, workbook_config)
     imports = specs["imports"]
     lines = render_fwf_lines(imports, n_rows=10, seed=42)
 
@@ -27,8 +28,9 @@ def test_render_fwf_lines_produces_fixed_width(schema_workbook: Path) -> None:
 
 def test_render_fwf_lines_with_bad_rows_includes_truncated_and_null(
     schema_workbook: Path,
+    workbook_config,
 ) -> None:
-    specs = read_workbook(schema_workbook, "2024-01")
+    specs = read_workbook(schema_workbook, workbook_config)
     imports = specs["imports"]
     lines = render_fwf_lines(imports, n_rows=5, seed=1, include_bad=True)
 
@@ -38,15 +40,15 @@ def test_render_fwf_lines_with_bad_rows_includes_truncated_and_null(
     assert any(w != imports.record_length for w in widths)
 
 
-def test_render_fwf_lines_is_deterministic(schema_workbook: Path) -> None:
-    spec = read_workbook(schema_workbook, "2024-01")["exports_us"]
+def test_render_fwf_lines_is_deterministic(schema_workbook: Path, workbook_config) -> None:
+    spec = read_workbook(schema_workbook, workbook_config)["exports_us"]
     a = render_fwf_lines(spec, n_rows=20, seed=7)
     b = render_fwf_lines(spec, n_rows=20, seed=7)
     assert a == b
 
 
-def test_make_zip_input_roundtrip(tmp_path: Path, schema_workbook: Path) -> None:
-    spec = read_workbook(schema_workbook, "2024-01")["exports_nonus"]
+def test_make_zip_input_roundtrip(tmp_path: Path, schema_workbook: Path, workbook_config) -> None:
+    spec = read_workbook(schema_workbook, workbook_config)["exports_nonus"]
     lines = render_fwf_lines(spec, n_rows=3, seed=0)
     zip_path = make_zip_input(tmp_path / "exports_nonus_202401.zip", lines)
 
@@ -95,8 +97,9 @@ def test_render_fwf_lines_roundtrips_against_shipping_spec(tmp_path: Path) -> No
         assert len(line) == spec.record_length
 
     zip_path = make_zip_input(tmp_path / "imports_202404.zip", lines)
+    raw = RawInput(trade_type="imports", year=2024, month=4, path=zip_path)
 
     captured: list[QualityIssue] = []
-    batches = list(iter_record_batches_from_path(zip_path, spec, on_quality_issue=captured.append))
+    batches = list(iter_record_batches(raw, spec, on_quality_issue=captured.append))
     assert captured == [], f"unexpected quality issues: {captured}"
     assert sum(b.num_rows for b in batches) == 5

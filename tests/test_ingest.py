@@ -21,8 +21,8 @@ from tests._helpers import make_zip_input, render_fwf_lines
 
 
 @pytest.fixture
-def imports_spec(schema_workbook: Path):
-    return read_workbook(schema_workbook, "2024-01")["imports"]
+def imports_spec(schema_workbook: Path, workbook_config):
+    return read_workbook(schema_workbook, workbook_config)["imports"]
 
 
 def _raw_input(tmp_path: Path, lines: list[str], *, year: int = 2024, month: int = 4) -> RawInput:
@@ -145,11 +145,24 @@ def test_ingest_rejects_trade_type_mismatch(imports_spec, tmp_path: Path) -> Non
 
 
 def test_ingest_rejects_period_before_effective_from(imports_spec, tmp_path: Path) -> None:
-    line = render_fwf_lines(imports_spec, n_rows=1, seed=0)[0]
+    # Rewrap the fixture spec as if its effective_from were 2024-01 so a 2023
+    # input is explicitly out of window for this safety check.
+    spec_2024 = Spec(
+        trade_type=imports_spec.trade_type,
+        version="2024-01",
+        effective_from="2024-01",
+        effective_to=imports_spec.effective_to,
+        record_length=imports_spec.record_length,
+        columns=imports_spec.columns,
+        source=imports_spec.source,
+        derived=imports_spec.derived,
+        partition_by=imports_spec.partition_by,
+    )
+    line = render_fwf_lines(spec_2024, n_rows=1, seed=0)[0]
     raw = _raw_input(tmp_path, [line], year=2023, month=12)
 
     with pytest.raises(IngestError, match="does not apply"):
-        list(iter_record_batches(raw, imports_spec, chunk_rows=100))
+        list(iter_record_batches(raw, spec_2024, chunk_rows=100))
 
 
 def test_ingest_date_column_parses_yyyymmdd(tmp_path: Path) -> None:

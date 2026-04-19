@@ -9,11 +9,13 @@ single in-tree synthetic source of truth, matching the real-world workflow
 from __future__ import annotations
 
 import random
+import re
 import string
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
+import yaml
 from openpyxl import Workbook
 
 from microtrade.schema import Column, Spec
@@ -37,6 +39,65 @@ SHEET_HEADER: tuple[str, ...] = (
     "description",
     "parse",
 )
+
+SHEET_TITLES: dict[str, str] = {
+    "imports": "ImportsSheet",
+    "exports_us": "USExportsSheet",
+    "exports_nonus": "NonUSExportsSheet",
+}
+
+
+def default_filename_pattern(sheet_title: str) -> str:
+    """Synthetic filename pattern used by tests for a given sheet title."""
+    return (
+        f"^{re.escape(sheet_title)}"
+        r"_(?P<year>\d{4})(?P<month>\d{2})(?P<flag>[NC])\.TXT\.zip$"
+    )
+
+
+def input_filename(sheet_title: str, year: int, month: int, flag: str = "N") -> str:
+    """Filename that matches `default_filename_pattern(sheet_title)`."""
+    return f"{sheet_title}_{year}{month:02d}{flag}.TXT.zip"
+
+
+def build_project_config(
+    config_path: Path,
+    workbook_path: Path,
+    effective_from: str,
+    *,
+    effective_to: str | None = None,
+    workbook_id: str | None = None,
+    sheet_titles: dict[str, str] | None = None,
+) -> Path:
+    """Write a `microtrade.yaml` referencing `workbook_path` with default patterns.
+
+    Produces one entry per (trade_type, sheet_title) pair in `sheet_titles`
+    (defaulting to `SHEET_TITLES`). Each sheet gets the synthetic default
+    filename pattern and, if `trade_type` differs from its positional index,
+    an explicit `trade_type` override.
+    """
+    titles = sheet_titles if sheet_titles is not None else SHEET_TITLES
+    sheets_cfg: dict[str, dict[str, str]] = {}
+    for trade_type, sheet_title in titles.items():
+        sheets_cfg[sheet_title] = {
+            "trade_type": trade_type,
+            "filename_pattern": default_filename_pattern(sheet_title),
+        }
+    workbook_entry: dict[str, object] = {
+        "effective_from": effective_from,
+        "sheets": sheets_cfg,
+    }
+    if effective_to is not None:
+        workbook_entry["effective_to"] = effective_to
+    if workbook_id is not None:
+        workbook_entry["workbook_id"] = workbook_id
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        yaml.safe_dump({"workbooks": {workbook_path.name: workbook_entry}}, sort_keys=False),
+        encoding="utf-8",
+    )
+    return config_path
+
 
 DEFAULT_SHEETS: tuple[SheetSpec, ...] = (
     SheetSpec(
@@ -82,8 +143,10 @@ def build_workbook(path: Path, sheets: tuple[SheetSpec, ...] = DEFAULT_SHEETS) -
     """
     wb = Workbook()
     wb.remove(wb.active)  # drop the default sheet openpyxl creates
-    for idx, sheet in enumerate(sheets, start=1):
-        ws = wb.create_sheet(title=f"SHEET{idx:03d}")
+    for sheet in sheets:
+        # Distinct first-two-chars per sheet so the discover old-pattern
+        # `(workbook_id, sheet[:2])` lookup doesn't collide on the fixture.
+        ws = wb.create_sheet(title=SHEET_TITLES[sheet.trade_type])
         ws.append([f"Synthetic layout for {sheet.trade_type}", None, None, None, None, None])
         ws.append(["CONFIDENTIAL", None, None, None, None, None])
         ws.append([None, None, None, None, None, None])

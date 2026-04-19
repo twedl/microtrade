@@ -1,26 +1,15 @@
 """One-shot converter: Excel schema workbook -> versioned YAML specs.
 
-Real workbooks supplied upstream use a layout that is loose by spreadsheet
-standards: sheets are ordered (sheet 1 = imports, 2 = exports_us, 3 =
-exports_nonus) regardless of name, the field table sits below a few preamble
-rows, and the table itself reads `Position | Description | Length | Type` with
-``Blank`` rows interleaved as FWF filler bytes that are not real fields.
-
-This module:
-
-- maps the first three sheets positionally onto :data:`TRADE_TYPES`,
-- autodetects the header row by looking for `Position`, `Description`,
-  `Length`, `Type` (case-insensitive) in the same row,
-- skips rows whose Description is `Blank` (FWF padding),
-- normalizes the `Type` token to one of the canonical Polars dtype names
-  (Utf8, Int64, Float64, Date),
-- preserves the rightmost extent (Blank or real) as the spec's
-  ``record_length`` so FWF line-length validation matches the source layout.
-
-Optional `Nullable` and `Parse` columns are honored when present; otherwise
-columns default to nullable + the dtype's default parse string. This module
-runs only via `microtrade import-spec PATH.xlsx --effective-from YYYY-MM` and
-never on the ingest hot path.
+`read_workbook(path, WorkbookConfig)` reads the sheets named in the config,
+parses each one's `Position | Description | Length | Type` table (case-
+insensitive; `Blank` rows are FWF padding that extend record_length but
+do not become columns), normalizes the `Type` token to a canonical Polars
+dtype (Utf8, Int64, Float64, Date), and emits one `Spec` per sheet with
+`effective_from`/`effective_to`/`workbook_id`/`filename_pattern` baked in
+from the config. Optional `Nullable` and `Parse` columns are honored when
+present; otherwise columns default to nullable + the dtype's default
+parse string. Only called by `microtrade import-spec`; never on the ingest
+hot path.
 """
 
 from __future__ import annotations
@@ -32,6 +21,7 @@ from typing import Any
 
 import polars as pl
 
+from microtrade.config import WorkbookConfig
 from microtrade.schema import (
     TRADE_TYPES,
     Column,
@@ -40,7 +30,6 @@ from microtrade.schema import (
     SpecSource,
     file_sha256,
     now_iso,
-    validate_period,
     validate_spec,
 )
 
@@ -82,40 +71,12 @@ _PARSE_FOR_DTYPE: Mapping[str, str | None] = {
 
 _BLANK_FIELD: str = "blank"
 
-# Substrings we expect to find in each trade type's sheet preamble (case-insensitive).
-# Used as a cheap, high-signal sanity check that a positionally-mapped sheet is
-# actually describing the trade type we think it is. `forbidden` keeps
-# `exports_us` from matching an `exports_nonus` sheet whose preamble happens
-# to contain "export" + "us" (from "Non-US").
-_TitleHint = tuple[tuple[str, ...], tuple[str, ...]]  # (required, forbidden)
-_TITLE_HINTS: Mapping[str, _TitleHint] = {
-    "imports": (("import",), ()),
-    "exports_us": (("export", "us"), ("non",)),
-    "exports_nonus": (("export", "non"), ()),
-}
-_PREAMBLE_ROWS: int = 5
-
 
 def normalize_dtype(raw: str) -> str:
     key = raw.strip().lower()
     if key in _DTYPE_ALIASES:
         return _DTYPE_ALIASES[key]
     raise SpecError(f"unrecognized dtype {raw!r}; known: {sorted(set(_DTYPE_ALIASES.values()))}")
-
-
-def _preamble_text(df: pl.DataFrame) -> str:
-    """Collect the first few rows of `df` into a single lowercased string.
-
-    Used only for fuzzy title matching - we don't care about structure here.
-    """
-    rows = df.head(_PREAMBLE_ROWS).iter_rows()
-    return " ".join(str(c).lower() for row in rows for c in row if c is not None)
-
-
-def _sheet_title_matches(df: pl.DataFrame, trade_type: str) -> bool:
-    required, forbidden = _TITLE_HINTS[trade_type]
-    preamble = _preamble_text(df)
-    return all(r in preamble for r in required) and not any(f in preamble for f in forbidden)
 
 
 def _coerce_bool(value: Any) -> bool:
@@ -263,42 +224,72 @@ def _derived_for(columns: tuple[Column, ...]) -> tuple[tuple[str, str], ...]:
     return ()
 
 
-def read_workbook(workbook: Path, effective_from: str) -> dict[str, Spec]:
-    """Parse the workbook into one Spec per trade type. Sheets map by position
-    (1 -> imports, 2 -> exports_us, 3 -> exports_nonus); names are ignored."""
-    validate_period(effective_from)
+def derive_workbook_id(workbook_filename: str) -> str:
+    """Pull the stable identifier off the front of a workbook filename.
+
+    The convention upstream is `<workbook_id>_<rest>.<ext>`, e.g.
+    `XYZ12345_Record_Layout.xls` -> `XYZ12345`,
+    `ABC-1234567_Record_Layout.xls` -> `ABC-1234567`. Falls back to the
+    stem if there is no `_` to split on.
+    """
+    stem = Path(workbook_filename).stem
+    head, sep, _ = stem.partition("_")
+    return head if sep else stem
+
+
+def read_workbook(workbook: Path, workbook_config: WorkbookConfig) -> dict[str, Spec]:
+    """Parse only the sheets listed in `workbook_config.sheets` into Specs.
+
+    Each listed sheet maps to a trade type (explicit via `SheetConfig.trade_type`,
+    or positional via TRADE_TYPES when omitted). `effective_from`, `effective_to`,
+    `workbook_id`, and per-sheet `filename_pattern` all come from the config and
+    are baked into the emitted Specs so discovery can run without the config.
+    """
+    effective_from = workbook_config.effective_from
     workbook = workbook.resolve()
     sha = file_sha256(workbook)
     imported_at = now_iso()
+    resolved_workbook_id = (
+        workbook_config.workbook_id
+        if workbook_config.workbook_id is not None
+        else derive_workbook_id(workbook.name)
+    )
 
     sheets = pl.read_excel(workbook, sheet_id=0, has_header=False)
     if not isinstance(sheets, dict):
         raise SpecError("polars.read_excel did not return a sheet dict")
 
-    sheet_items = list(sheets.items())
-    if len(sheet_items) < len(TRADE_TYPES):
+    missing = [name for name in workbook_config.sheets if name not in sheets]
+    if missing:
         raise SpecError(
-            f"workbook {workbook.name} has {len(sheet_items)} sheet(s); "
-            f"need at least {len(TRADE_TYPES)} (one per trade type, in order: "
-            f"{list(TRADE_TYPES)})"
+            f"workbook {workbook.name} does not contain sheet(s) {missing}; "
+            f"available: {list(sheets)}"
         )
 
     out: dict[str, Spec] = {}
-    for position, (trade_type, (sheet_name, df)) in enumerate(
-        zip(TRADE_TYPES, sheet_items, strict=False), start=1
-    ):
-        if not _sheet_title_matches(df, trade_type):
-            preamble_excerpt = _preamble_text(df)[:160]
+    for sheet_idx, (sheet_name, sheet_config) in enumerate(workbook_config.sheets.items()):
+        if sheet_config.trade_type is not None:
+            trade_type = sheet_config.trade_type
+        elif sheet_idx < len(TRADE_TYPES):
+            trade_type = TRADE_TYPES[sheet_idx]
+        else:
             raise SpecError(
-                f"sheet {sheet_name!r} at position {position} does not look like a "
-                f"{trade_type!r} layout; preamble reads: {preamble_excerpt!r}. "
-                f"Expected sheet order: {list(TRADE_TYPES)}."
+                f"workbook {workbook.name}: sheet {sheet_name!r} at position "
+                f"{sheet_idx} has no trade_type and no positional fallback "
+                f"(only {len(TRADE_TYPES)} positional slots: {list(TRADE_TYPES)})"
             )
+        df = sheets[sheet_name]
         columns, record_length = _sheet_to_layout(df, sheet_name)
+        if trade_type in out:
+            raise SpecError(
+                f"workbook {workbook.name}: sheets map multiple entries to trade_type "
+                f"{trade_type!r}"
+            )
         spec = Spec(
             trade_type=trade_type,
             version=effective_from,
             effective_from=effective_from,
+            effective_to=workbook_config.effective_to,
             record_length=record_length,
             columns=columns,
             source=SpecSource(
@@ -306,6 +297,8 @@ def read_workbook(workbook: Path, effective_from: str) -> dict[str, Spec]:
                 sha256=sha,
                 sheet=sheet_name,
                 imported_at=imported_at,
+                filename_pattern=sheet_config.filename_pattern,
+                workbook_id=resolved_workbook_id,
             ),
             derived=_derived_for(columns),
         )

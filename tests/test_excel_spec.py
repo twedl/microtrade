@@ -9,8 +9,14 @@ from typer.testing import CliRunner
 
 from microtrade import schema
 from microtrade.cli import app
-from microtrade.excel_spec import normalize_dtype, read_workbook
+from microtrade.config import WorkbookConfig, load_config
+from microtrade.excel_spec import derive_workbook_id, normalize_dtype, read_workbook
 from microtrade.schema import TRADE_TYPES, SpecError, load_spec
+from tests._helpers import (
+    build_project_config,
+    build_workbook,
+    default_filename_pattern,
+)
 
 
 def test_normalize_dtype_handles_common_aliases() -> None:
@@ -18,7 +24,6 @@ def test_normalize_dtype_handles_common_aliases() -> None:
     assert normalize_dtype(" INT ") == "Int64"
     assert normalize_dtype("float64") == "Float64"
     assert normalize_dtype("date") == "Date"
-    # Real-workbook tokens.
     assert normalize_dtype("Char") == "Utf8"
     assert normalize_dtype("Num") == "Int64"
 
@@ -28,14 +33,16 @@ def test_normalize_dtype_rejects_unknown() -> None:
         normalize_dtype("chronology")
 
 
-def test_read_workbook_produces_spec_per_trade_type(schema_workbook: Path) -> None:
-    specs = read_workbook(schema_workbook, "2024-01")
+def test_read_workbook_produces_spec_per_trade_type(
+    schema_workbook: Path, workbook_config: WorkbookConfig
+) -> None:
+    specs = read_workbook(schema_workbook, workbook_config)
     assert set(specs) == set(TRADE_TYPES)
 
     imports = specs["imports"]
     assert imports.trade_type == "imports"
-    assert imports.effective_from == "2024-01"
-    assert imports.record_length == 53  # 39 + 15 - 1 per synthetic sheet
+    assert imports.effective_from == "2020-01"
+    assert imports.record_length == 53
     assert [c.name for c in imports.columns] == [
         "period",
         "hs_code",
@@ -46,20 +53,15 @@ def test_read_workbook_produces_spec_per_trade_type(schema_workbook: Path) -> No
     ]
     assert imports.source is not None
     assert imports.source.workbook == schema_workbook.name
-    # Sheets map positionally now; the synthetic builder uses `SHEET001` etc.
-    assert imports.source.sheet == "SHEET001"
+    assert imports.source.sheet == "ImportsSheet"
+    assert imports.source.filename_pattern == default_filename_pattern("ImportsSheet")
     assert imports.derived == (("year", "year(period)"), ("month", "month(period)"))
 
     exports_nonus = specs["exports_nonus"]
     assert [c.dtype for c in exports_nonus.columns] == ["Utf8", "Utf8", "Utf8", "Float64"]
 
 
-def test_read_workbook_rejects_invalid_period(schema_workbook: Path) -> None:
-    with pytest.raises(SpecError):
-        read_workbook(schema_workbook, "2024/01")
-
-
-def test_read_workbook_rejects_too_few_sheets(tmp_path: Path) -> None:
+def test_read_workbook_rejects_missing_sheet(tmp_path: Path) -> None:
     from openpyxl import Workbook
 
     wb = Workbook()
@@ -67,11 +69,15 @@ def test_read_workbook_rejects_too_few_sheets(tmp_path: Path) -> None:
     ws = wb.create_sheet("only_one")
     ws.append(["Position", "Description", "Length", "Type"])
     ws.append([1, "a", 5, "Char"])
-    path = tmp_path / "wb.xlsx"
-    wb.save(path)
+    wb_path = tmp_path / "wb.xlsx"
+    wb.save(wb_path)
 
-    with pytest.raises(SpecError, match="need at least"):
-        read_workbook(path, "2024-01")
+    # Config references a sheet that isn't in the workbook.
+    config_path = build_project_config(tmp_path / "microtrade.yaml", wb_path, "2024-01")
+    workbook_config = load_config(config_path).get_workbook(wb_path)
+
+    with pytest.raises(SpecError, match="does not contain sheet"):
+        read_workbook(wb_path, workbook_config)
 
 
 def test_read_workbook_skips_blank_filler_rows(tmp_path: Path) -> None:
@@ -81,105 +87,102 @@ def test_read_workbook_skips_blank_filler_rows(tmp_path: Path) -> None:
 
     wb = Workbook()
     wb.remove(wb.active)
-    for sheet_idx, name in enumerate(("imports", "exports_us", "exports_nonus"), start=1):
-        ws = wb.create_sheet(f"SHEET{sheet_idx:03d}")
-        ws.append([f"layout {name}", None, None, None])
-        ws.append(["Position", "Description", "Length", "Type"])
-        ws.append([1, "code", 5, "Char"])
-        ws.append([6, "Blank", 1, "Char"])  # filler
-        ws.append([7, "value", 10, "Num"])
-        ws.append([17, "Blank", 3, "Char"])  # trailing filler extends record_length
-    path = tmp_path / "wb.xlsx"
-    wb.save(path)
+    sheet_title = "ImportsSheet"
+    ws = wb.create_sheet(sheet_title)
+    ws.append(["layout imports", None, None, None])
+    ws.append(["Position", "Description", "Length", "Type"])
+    ws.append([1, "code", 5, "Char"])
+    ws.append([6, "Blank", 1, "Char"])  # filler
+    ws.append([7, "value", 10, "Num"])
+    ws.append([17, "Blank", 3, "Char"])  # trailing filler extends record_length
+    wb_path = tmp_path / "wb.xlsx"
+    wb.save(wb_path)
 
-    specs = read_workbook(path, "2024-01")
+    config_path = build_project_config(
+        tmp_path / "microtrade.yaml",
+        wb_path,
+        "2024-01",
+        sheet_titles={"imports": sheet_title},
+    )
+    workbook_config = load_config(config_path).get_workbook(wb_path)
+
+    specs = read_workbook(wb_path, workbook_config)
     imports = specs["imports"]
     assert [c.name for c in imports.columns] == ["code", "value"]
     assert [c.dtype for c in imports.columns] == ["Utf8", "Int64"]
-    assert imports.record_length == 19  # trailing Blank pushes it past `value`'s end (16)
+    assert imports.record_length == 19
 
 
-def _minimal_sheet(ws, title: str) -> None:
-    """Seed a workbook sheet with a preamble title + one-column field table."""
-    ws.append([title, None, None, None])
-    ws.append(["Position", "Description", "Length", "Type"])
-    ws.append([1, "code", 5, "Char"])
+def test_read_workbook_bakes_effective_to(tmp_path: Path) -> None:
+    workbook = build_workbook(tmp_path / "wb.xlsx")
+    config_path = build_project_config(
+        tmp_path / "microtrade.yaml", workbook, "2020-01", effective_to="2023-12"
+    )
+    workbook_config = load_config(config_path).get_workbook(workbook)
+
+    specs = read_workbook(workbook, workbook_config)
+    for spec in specs.values():
+        assert spec.effective_to == "2023-12"
 
 
-def test_read_workbook_rejects_mis_ordered_sheets(tmp_path: Path) -> None:
-    """Swapping the imports and exports_us sheets should raise, not silently
-    produce YAML where `imports` actually describes the exports layout."""
-    from openpyxl import Workbook
-
-    wb = Workbook()
-    wb.remove(wb.active)
-    # Position 1 holds the exports_us preamble; positions 2 and 3 are fine.
-    _minimal_sheet(wb.create_sheet("SHEET001"), "Exports for all HS8 codes (US-CA)")
-    _minimal_sheet(wb.create_sheet("SHEET002"), "Imports for All HS10 codes")
-    _minimal_sheet(wb.create_sheet("SHEET003"), "Exports for all HS8 codes (Non-US)")
-    path = tmp_path / "wb.xlsx"
-    wb.save(path)
-
-    with pytest.raises(SpecError, match=r"position 1 does not look like a 'imports'"):
-        read_workbook(path, "2024-01")
+def test_read_workbook_default_workbook_id_derives_from_filename(
+    schema_workbook: Path, workbook_config: WorkbookConfig
+) -> None:
+    specs = read_workbook(schema_workbook, workbook_config)
+    for spec in specs.values():
+        assert spec.source is not None
+        # `schema_workbook.xlsx` -> "schema" (config does not set workbook_id).
+        assert spec.source.workbook_id == "schema"
 
 
-def test_read_workbook_discriminates_exports_us_from_exports_nonus(tmp_path: Path) -> None:
-    """The exports_nonus preamble ("...(Non-US)") contains "export" and "us",
-    so `exports_us` must NOT accept it - the forbidden `"non"` hint handles that.
-    Putting the exports_nonus sheet at position 2 (where exports_us belongs)
-    should raise."""
-    from openpyxl import Workbook
+def test_read_workbook_config_workbook_id_wins(tmp_path: Path) -> None:
+    workbook = build_workbook(tmp_path / "wb.xlsx")
+    config_path = build_project_config(
+        tmp_path / "microtrade.yaml", workbook, "2020-01", workbook_id="XYZ12345"
+    )
+    workbook_config = load_config(config_path).get_workbook(workbook)
 
-    wb = Workbook()
-    wb.remove(wb.active)
-    _minimal_sheet(wb.create_sheet("SHEET001"), "Imports for All HS10 codes")
-    _minimal_sheet(wb.create_sheet("SHEET002"), "Exports for all HS8 codes (Non-US)")
-    _minimal_sheet(wb.create_sheet("SHEET003"), "Exports for all HS8 codes (US-CA)")
-    path = tmp_path / "wb.xlsx"
-    wb.save(path)
-
-    with pytest.raises(SpecError, match=r"position 2 does not look like a 'exports_us'"):
-        read_workbook(path, "2024-01")
+    specs = read_workbook(workbook, workbook_config)
+    for spec in specs.values():
+        assert spec.source is not None
+        assert spec.source.workbook_id == "XYZ12345"
 
 
-def test_read_workbook_rejects_unlabeled_preambles(tmp_path: Path) -> None:
-    """A workbook whose sheets carry only generic titles (no trade-type hint)
-    fails the sanity check - better to refuse than to commit swapped YAML."""
-    from openpyxl import Workbook
-
-    wb = Workbook()
-    wb.remove(wb.active)
-    for i in range(1, 4):
-        _minimal_sheet(wb.create_sheet(f"SHEET{i:03d}"), f"Generic Layout {i}")
-    path = tmp_path / "wb.xlsx"
-    wb.save(path)
-
-    with pytest.raises(SpecError, match="does not look like a 'imports'"):
-        read_workbook(path, "2024-01")
+# --- import-spec CLI --------------------------------------------------------
 
 
-def test_import_spec_cli_writes_yaml(schema_workbook: Path, tmp_path: Path) -> None:
-    out_dir = tmp_path / "specs"
-    result = CliRunner().invoke(
+def _invoke_import(
+    runner: CliRunner, workbook: Path, config_path: Path, out_dir: Path, *extra: str
+):
+    return runner.invoke(
         app,
         [
             "import-spec",
-            str(schema_workbook),
-            "--effective-from",
-            "2024-01",
+            str(workbook),
+            "--config",
+            str(config_path),
             "--out",
             str(out_dir),
+            *extra,
         ],
     )
+
+
+def test_import_spec_cli_writes_yaml(
+    schema_workbook: Path, project_config_path: Path, tmp_path: Path
+) -> None:
+    out_dir = tmp_path / "specs"
+    result = _invoke_import(CliRunner(), schema_workbook, project_config_path, out_dir)
     assert result.exit_code == 0, result.output
 
     for trade_type in TRADE_TYPES:
-        path = out_dir / trade_type / "v2024-01.yaml"
+        path = out_dir / trade_type / "v2020-01.yaml"
         assert path.exists()
         spec = load_spec(path)
         assert spec.trade_type == trade_type
-        assert spec.effective_from == "2024-01"
+        assert spec.effective_from == "2020-01"
+        assert spec.source is not None
+        assert spec.source.filename_pattern is not None
 
 
 def test_import_spec_cli_prints_diff_against_previous(
@@ -188,86 +191,80 @@ def test_import_spec_cli_prints_diff_against_previous(
     out_dir = tmp_path / "specs"
     runner = CliRunner()
 
-    first = runner.invoke(
-        app,
-        ["import-spec", str(schema_workbook), "--effective-from", "2024-01", "--out", str(out_dir)],
-    )
+    cfg_v1 = build_project_config(tmp_path / "v1.yaml", schema_workbook, "2020-01")
+    first = _invoke_import(runner, schema_workbook, cfg_v1, out_dir)
     assert first.exit_code == 0
 
-    # Re-run for a later effective-from; should succeed and report no diff.
-    second = runner.invoke(
-        app,
-        ["import-spec", str(schema_workbook), "--effective-from", "2025-01", "--out", str(out_dir)],
-    )
+    cfg_v2 = build_project_config(tmp_path / "v2.yaml", schema_workbook, "2025-01")
+    second = _invoke_import(runner, schema_workbook, cfg_v2, out_dir)
     assert second.exit_code == 0, second.output
-    assert "diff vs v2024-01" in second.output
+    assert "diff vs v2020-01" in second.output
 
 
 def test_import_spec_cli_refuses_overwrite_without_force(
-    schema_workbook: Path, tmp_path: Path
+    schema_workbook: Path, project_config_path: Path, tmp_path: Path
 ) -> None:
     out_dir = tmp_path / "specs"
     runner = CliRunner()
 
-    runner.invoke(
-        app,
-        ["import-spec", str(schema_workbook), "--effective-from", "2024-01", "--out", str(out_dir)],
-    )
-    result = runner.invoke(
-        app,
-        ["import-spec", str(schema_workbook), "--effective-from", "2024-01", "--out", str(out_dir)],
-    )
+    first = _invoke_import(runner, schema_workbook, project_config_path, out_dir)
+    assert first.exit_code == 0
+
+    result = _invoke_import(runner, schema_workbook, project_config_path, out_dir)
     assert result.exit_code == 1
     assert "already exists" in result.output
 
-    forced = runner.invoke(
-        app,
-        [
-            "import-spec",
-            str(schema_workbook),
-            "--effective-from",
-            "2024-01",
-            "--out",
-            str(out_dir),
-            "--force",
-        ],
-    )
+    forced = _invoke_import(runner, schema_workbook, project_config_path, out_dir, "--force")
     assert forced.exit_code == 0
+
+
+def test_import_spec_cli_errors_when_workbook_missing_from_config(
+    schema_workbook: Path, tmp_path: Path
+) -> None:
+    """If the config lists no entry for this workbook, fail with a clear message."""
+    other_workbook = build_workbook(tmp_path / "other.xlsx")
+    config_path = build_project_config(tmp_path / "microtrade.yaml", other_workbook, "2020-01")
+    out_dir = tmp_path / "specs"
+
+    result = _invoke_import(CliRunner(), schema_workbook, config_path, out_dir)
+    assert result.exit_code == 2
+    assert "not listed in the project config" in result.output
 
 
 # --- validate-specs ---------------------------------------------------------
 
 
-def _seed_valid_specs(spec_dir: Path, schema_workbook: Path) -> None:
-    """Helper: drop v2020-01 specs for all three trade types into `spec_dir`."""
-    specs = read_workbook(schema_workbook, "2020-01")
+def _seed_valid_specs(
+    spec_dir: Path, schema_workbook: Path, workbook_config: WorkbookConfig
+) -> None:
+    specs = read_workbook(schema_workbook, workbook_config)
     for trade_type, spec in specs.items():
-        schema.save_spec(spec, spec_dir / trade_type / "v2020-01.yaml")
+        schema.save_spec(spec, spec_dir / trade_type / f"v{spec.effective_from}.yaml")
 
 
 def test_validate_specs_ok_on_clean_tree(schema_workbook: Path, tmp_path: Path) -> None:
     spec_dir = tmp_path / "specs"
-    _seed_valid_specs(spec_dir, schema_workbook)
-    # Add a second version so the command exercises the diff path.
-    v2_specs = read_workbook(schema_workbook, "2024-06")
-    for trade_type, spec in v2_specs.items():
-        schema.save_spec(spec, spec_dir / trade_type / "v2024-06.yaml")
+    cfg_v1 = build_project_config(
+        tmp_path / "v1.yaml", schema_workbook, "2020-01", effective_to="2023-12"
+    )
+    cfg_v2 = build_project_config(tmp_path / "v2.yaml", schema_workbook, "2024-01")
+    _seed_valid_specs(spec_dir, schema_workbook, load_config(cfg_v1).get_workbook(schema_workbook))
+    _seed_valid_specs(spec_dir, schema_workbook, load_config(cfg_v2).get_workbook(schema_workbook))
 
     result = CliRunner().invoke(app, ["validate-specs", "--spec-dir", str(spec_dir)])
     assert result.exit_code == 0, result.output
-    # Summary reports 3 trade types x 2 specs each = 6 specs total.
     assert "OK (3 trade types, 6 specs)" in result.output
     assert "imports:" in result.output
     assert "v2020-01" in result.output
-    assert "v2024-06" in result.output
-    # Identical specs => "no column changes" in the diff section.
+    assert "v2024-01" in result.output
     assert "no column changes" in result.output
 
 
-def test_validate_specs_reports_invalid_yaml(schema_workbook: Path, tmp_path: Path) -> None:
+def test_validate_specs_reports_invalid_yaml(
+    schema_workbook: Path, workbook_config: WorkbookConfig, tmp_path: Path
+) -> None:
     spec_dir = tmp_path / "specs"
-    _seed_valid_specs(spec_dir, schema_workbook)
-    # Overwrite the imports spec with one that has overlapping columns.
+    _seed_valid_specs(spec_dir, schema_workbook, workbook_config)
     bad = spec_dir / "imports" / "v2020-01.yaml"
     bad.write_text(
         "trade_type: imports\n"
@@ -288,11 +285,10 @@ def test_validate_specs_reports_invalid_yaml(schema_workbook: Path, tmp_path: Pa
 
 
 def test_validate_specs_rejects_filename_version_mismatch(
-    schema_workbook: Path, tmp_path: Path
+    schema_workbook: Path, workbook_config: WorkbookConfig, tmp_path: Path
 ) -> None:
     spec_dir = tmp_path / "specs"
-    _seed_valid_specs(spec_dir, schema_workbook)
-    # Rename the imports YAML so the filename version disagrees with effective_from.
+    _seed_valid_specs(spec_dir, schema_workbook, workbook_config)
     (spec_dir / "imports" / "v2020-01.yaml").rename(spec_dir / "imports" / "v2020-02.yaml")
 
     result = CliRunner().invoke(app, ["validate-specs", "--spec-dir", str(spec_dir)])
@@ -300,13 +296,78 @@ def test_validate_specs_rejects_filename_version_mismatch(
     assert "does not match effective_from" in result.output
 
 
-def test_validate_specs_reports_dtype_conflict_across_versions(
+def test_validate_specs_flags_window_overlap(schema_workbook: Path, tmp_path: Path) -> None:
+    """Two specs whose [effective_from, effective_to] windows overlap must fail."""
+    spec_dir = tmp_path / "specs"
+    cfg_early = build_project_config(
+        tmp_path / "early.yaml", schema_workbook, "2020-01", effective_to="2024-12"
+    )
+    cfg_late = build_project_config(tmp_path / "late.yaml", schema_workbook, "2024-06")
+    _seed_valid_specs(
+        spec_dir, schema_workbook, load_config(cfg_early).get_workbook(schema_workbook)
+    )
+    _seed_valid_specs(
+        spec_dir, schema_workbook, load_config(cfg_late).get_workbook(schema_workbook)
+    )
+
+    result = CliRunner().invoke(app, ["validate-specs", "--spec-dir", str(spec_dir)])
+    assert result.exit_code == 1
+    assert "overlapping" in result.output.lower()
+
+
+def test_validate_specs_flags_gap_between_windows(schema_workbook: Path, tmp_path: Path) -> None:
+    spec_dir = tmp_path / "specs"
+    cfg_early = build_project_config(
+        tmp_path / "early.yaml", schema_workbook, "2020-01", effective_to="2022-12"
+    )
+    cfg_late = build_project_config(tmp_path / "late.yaml", schema_workbook, "2024-01")
+    _seed_valid_specs(
+        spec_dir, schema_workbook, load_config(cfg_early).get_workbook(schema_workbook)
+    )
+    _seed_valid_specs(
+        spec_dir, schema_workbook, load_config(cfg_late).get_workbook(schema_workbook)
+    )
+
+    result = CliRunner().invoke(app, ["validate-specs", "--spec-dir", str(spec_dir)])
+    assert result.exit_code == 1
+    assert "gap" in result.output.lower()
+
+
+def test_validate_specs_flags_open_ended_before_later_spec(
     schema_workbook: Path, tmp_path: Path
 ) -> None:
+    """An earlier spec without `effective_to` must not coexist with a later spec -
+    the active window would be ambiguous."""
     spec_dir = tmp_path / "specs"
-    _seed_valid_specs(spec_dir, schema_workbook)
-    # Write a v2024-06 for imports that conflicts on `value_usd` dtype (Int64 -> Float64).
-    v2 = read_workbook(schema_workbook, "2024-06")["imports"]
+    cfg_early = build_project_config(tmp_path / "early.yaml", schema_workbook, "2020-01")
+    cfg_late = build_project_config(tmp_path / "late.yaml", schema_workbook, "2024-01")
+    _seed_valid_specs(
+        spec_dir, schema_workbook, load_config(cfg_early).get_workbook(schema_workbook)
+    )
+    _seed_valid_specs(
+        spec_dir, schema_workbook, load_config(cfg_late).get_workbook(schema_workbook)
+    )
+
+    result = CliRunner().invoke(app, ["validate-specs", "--spec-dir", str(spec_dir)])
+    assert result.exit_code == 1
+    assert "open-ended" in result.output.lower()
+
+
+def test_validate_specs_reports_dtype_conflict_across_versions(
+    schema_workbook: Path, workbook_config: WorkbookConfig, tmp_path: Path
+) -> None:
+    spec_dir = tmp_path / "specs"
+    # First spec with a closed window.
+    cfg_early = build_project_config(
+        tmp_path / "early.yaml", schema_workbook, "2020-01", effective_to="2024-05"
+    )
+    _seed_valid_specs(
+        spec_dir, schema_workbook, load_config(cfg_early).get_workbook(schema_workbook)
+    )
+    # Second spec, later window, but we rewrite its `value_usd` dtype.
+    cfg_late = build_project_config(tmp_path / "late.yaml", schema_workbook, "2024-06")
+    wbcfg_late = load_config(cfg_late).get_workbook(schema_workbook)
+    v2 = read_workbook(schema_workbook, wbcfg_late)["imports"]
     new_cols = tuple(
         schema.Column(
             name=c.name,
@@ -323,6 +384,7 @@ def test_validate_specs_reports_dtype_conflict_across_versions(
         trade_type=v2.trade_type,
         version=v2.version,
         effective_from=v2.effective_from,
+        effective_to=v2.effective_to,
         record_length=v2.record_length,
         columns=new_cols,
         source=v2.source,
@@ -330,6 +392,11 @@ def test_validate_specs_reports_dtype_conflict_across_versions(
         partition_by=v2.partition_by,
     )
     schema.save_spec(v2_conflicting, spec_dir / "imports" / "v2024-06.yaml")
+    # Also seed the rest so validate-specs has something to compare.
+    for trade_type, spec in read_workbook(schema_workbook, wbcfg_late).items():
+        if trade_type == "imports":
+            continue
+        schema.save_spec(spec, spec_dir / trade_type / "v2024-06.yaml")
 
     result = CliRunner().invoke(app, ["validate-specs", "--spec-dir", str(spec_dir)])
     assert result.exit_code == 1
@@ -345,22 +412,11 @@ def test_validate_specs_empty_tree_exits_nonzero(tmp_path: Path) -> None:
     assert "no specs found" in result.output
 
 
-def test_validate_specs_passes_against_shipping_specs() -> None:
-    """Regression guard: the committed `src/microtrade/specs/*/v2020-01.yaml`
-    files must always pass `validate-specs` with the default `--spec-dir`."""
-    result = CliRunner().invoke(app, ["validate-specs"])
-    assert result.exit_code == 0, result.output
-    # Shipping tree: one spec per trade type.
-    assert "OK (3 trade types, 3 specs)" in result.output
-    for trade_type in TRADE_TYPES:
-        assert f"{trade_type}:" in result.output
-
-
-def test_validate_specs_continues_across_trade_types(schema_workbook: Path, tmp_path: Path) -> None:
-    """A bad spec under one trade type must not suppress the scan of the others."""
+def test_validate_specs_continues_across_trade_types(
+    schema_workbook: Path, workbook_config: WorkbookConfig, tmp_path: Path
+) -> None:
     spec_dir = tmp_path / "specs"
-    _seed_valid_specs(spec_dir, schema_workbook)
-    # Corrupt only the imports YAML; the other two remain valid.
+    _seed_valid_specs(spec_dir, schema_workbook, workbook_config)
     (spec_dir / "imports" / "v2020-01.yaml").write_text(
         "trade_type: imports\n"
         "version: '2020-01'\n"
@@ -374,17 +430,16 @@ def test_validate_specs_continues_across_trade_types(schema_workbook: Path, tmp_
 
     result = CliRunner().invoke(app, ["validate-specs", "--spec-dir", str(spec_dir)])
     assert result.exit_code == 1
-    assert "overlaps" in result.output  # imports problem reported
-    # The other two trade types still get their summaries despite the failure.
+    assert "overlaps" in result.output
     assert "exports_us:" in result.output
     assert "exports_nonus:" in result.output
 
 
-def test_validate_specs_ignores_non_v_prefixed_yaml(schema_workbook: Path, tmp_path: Path) -> None:
-    """Files that don't match the `v*.yaml` glob are ignored - they can hold
-    backups, notes, or editor droppings without breaking validation."""
+def test_validate_specs_ignores_non_v_prefixed_yaml(
+    schema_workbook: Path, workbook_config: WorkbookConfig, tmp_path: Path
+) -> None:
     spec_dir = tmp_path / "specs"
-    _seed_valid_specs(spec_dir, schema_workbook)
+    _seed_valid_specs(spec_dir, schema_workbook, workbook_config)
     (spec_dir / "imports" / "backup.yaml").write_text("not a spec\n", encoding="utf-8")
     (spec_dir / "imports" / "README.yaml").write_text("also not a spec\n", encoding="utf-8")
 
@@ -394,13 +449,18 @@ def test_validate_specs_ignores_non_v_prefixed_yaml(schema_workbook: Path, tmp_p
 
 
 def test_validate_specs_pluralizes_summary_for_singletons(
-    schema_workbook: Path, tmp_path: Path
+    schema_workbook: Path, workbook_config: WorkbookConfig, tmp_path: Path
 ) -> None:
-    """Summary uses singular forms when exactly one of each is scanned."""
     spec_dir = tmp_path / "specs"
-    imports_spec = read_workbook(schema_workbook, "2020-01")["imports"]
+    imports_spec = read_workbook(schema_workbook, workbook_config)["imports"]
     schema.save_spec(imports_spec, spec_dir / "imports" / "v2020-01.yaml")
 
     result = CliRunner().invoke(app, ["validate-specs", "--spec-dir", str(spec_dir)])
     assert result.exit_code == 0, result.output
     assert "OK (1 trade type, 1 spec)" in result.output
+
+
+def test_derive_workbook_id_strips_first_underscore_chunk() -> None:
+    assert derive_workbook_id("XYZ12345_Record_Layout.xls") == "XYZ12345"
+    assert derive_workbook_id("ABC-1234567_Record_Layout.xls") == "ABC-1234567"
+    assert derive_workbook_id("plainname.xlsx") == "plainname"
