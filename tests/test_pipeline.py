@@ -200,7 +200,7 @@ def test_pipeline_records_failure_and_continues(prepared_env) -> None:
     failed = next(r for r in summary.results if r.status == "failed")
     assert failed.trade_type == "imports"
     assert failed.year == 2024 and failed.month == 1
-    assert "record_length" in (failed.error or "")
+    assert "truncated" in (failed.error or "")
 
     # Failure is recorded in the manifest.
     manifest = next((env["output"] / "_manifests" / "imports").glob("*.jsonl")).read_text(

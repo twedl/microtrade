@@ -6,6 +6,26 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-04-20
+
+### Changed
+
+- Ingest treats `record_length` as an upper bound rather than requiring
+  strict equality. Each record must cover every real data column
+  (`Spec.min_record_length`) and must not exceed `record_length`;
+  trailing-filler bytes declared by the workbook's sentinel row are now
+  optional in the data. This lets a single spec ingest datasets that do
+  and do not include the workbook's optional trailing bytes, which was
+  breaking exports_us and exports_nonus after 0.1.3. Error messages
+  split into "record truncated" (too short to cover all columns) and
+  "longer than declared record_length" (unexpected extra bytes).
+
+### Added
+
+- `Spec.min_record_length` property — the rightmost real-column byte.
+  Shared between `validate_spec`'s "record_length ≥ rightmost column"
+  guard and ingest's per-line truncation check.
+
 ## [0.1.3] - 2026-04-19
 
 ### Added
@@ -161,7 +181,8 @@ and CLI command stay `microtrade`.
   `inspect`) ship implemented; the package is fully typed (`py.typed`
   marker included in the wheel).
 
-[unreleased]: https://github.com/twedl/microtrade/compare/v0.1.3...HEAD
+[unreleased]: https://github.com/twedl/microtrade/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/twedl/microtrade/releases/tag/v0.1.4
 [0.1.3]: https://github.com/twedl/microtrade/releases/tag/v0.1.3
 [0.1.2]: https://github.com/twedl/microtrade/releases/tag/v0.1.2
 [0.1.1]: https://github.com/twedl/microtrade/releases/tag/v0.1.1

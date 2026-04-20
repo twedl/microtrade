@@ -82,6 +82,14 @@ class Spec:
         """Columns sorted by start position (the FWF read order)."""
         return tuple(sorted(self.columns, key=lambda c: c.start))
 
+    @property
+    def min_record_length(self) -> int:
+        """Rightmost real-column byte - the shortest record that still covers
+        every declared column. `record_length` is an upper bound and may exceed
+        this to allow trailing filler bytes that the data does not always ship.
+        """
+        return max((c.end for c in self.columns), default=0)
+
 
 class SpecError(ValueError):
     """Raised when a spec is structurally invalid."""
@@ -184,11 +192,10 @@ def validate_spec(spec: Spec) -> None:
             raise SpecError(f"column {col.name!r} has non-positive length {col.length}")
         prev_end = col.end
 
-    expected_record_length = max(c.end for c in spec.columns)
-    if spec.record_length < expected_record_length:
+    if spec.record_length < spec.min_record_length:
         raise SpecError(
             f"record_length {spec.record_length} is shorter than rightmost column "
-            f"end {expected_record_length}"
+            f"end {spec.min_record_length}"
         )
 
 

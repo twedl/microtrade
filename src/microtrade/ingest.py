@@ -146,15 +146,26 @@ def _stream_lines(
     col_names = [c.name for c in columns_ordered]
     field_types = [arrow_schema.field(i).type for i in range(n)]
 
+    # Per-line comparisons resolve against locals; `record_length` is an upper
+    # bound and `min_required` is the last real-column byte.
+    min_required = spec.min_record_length
+    max_allowed = spec.record_length
+
     buffers: list[list[object]] = [[] for _ in range(n)]
     rows_in_batch = 0
 
     for line_no, raw_line in enumerate(text, start=1):
         line = raw_line.rstrip("\n").rstrip("\r")
-        if len(line) != spec.record_length:
+        line_len = len(line)
+        if line_len < min_required:
             raise IngestError(
-                f"{raw.path.name} line {line_no}: expected record_length "
-                f"{spec.record_length}, got {len(line)}"
+                f"{raw.path.name} line {line_no}: record truncated (need at least "
+                f"{min_required} bytes to cover all columns, got {line_len})"
+            )
+        if line_len > max_allowed:
+            raise IngestError(
+                f"{raw.path.name} line {line_no}: record longer than declared "
+                f"record_length {max_allowed} (got {line_len})"
             )
 
         row_values: list[object] = [None] * n

@@ -116,7 +116,30 @@ def test_ingest_rejects_short_line(imports_spec, tmp_path: Path) -> None:
     good_line = render_fwf_lines(imports_spec, n_rows=1, seed=0)[0]
     raw = _raw_input(tmp_path, [good_line, good_line[:-5]])
 
-    with pytest.raises(IngestError, match="expected record_length"):
+    with pytest.raises(IngestError, match="record truncated"):
+        list(iter_record_batches(raw, imports_spec, chunk_rows=100))
+
+
+def test_ingest_tolerates_missing_trailing_filler(imports_spec, tmp_path: Path) -> None:
+    """record_length is an upper bound. A record that's shorter than
+    record_length but still covers every real column is valid - this is how
+    datasets that omit optional trailing filler bytes ingest cleanly."""
+    from dataclasses import replace
+
+    padded_spec = replace(imports_spec, record_length=imports_spec.min_record_length + 3)
+    good_line = render_fwf_lines(imports_spec, n_rows=1, seed=0)[0]
+    raw = _raw_input(tmp_path, [good_line])
+
+    (batch,) = list(iter_record_batches(raw, padded_spec, chunk_rows=100))
+    assert batch.num_rows == 1
+
+
+def test_ingest_rejects_record_longer_than_record_length(imports_spec, tmp_path: Path) -> None:
+    good_line = render_fwf_lines(imports_spec, n_rows=1, seed=0)[0]
+    too_long = good_line + "XXX"
+    raw = _raw_input(tmp_path, [too_long])
+
+    with pytest.raises(IngestError, match="longer than declared record_length"):
         list(iter_record_batches(raw, imports_spec, chunk_rows=100))
 
 
