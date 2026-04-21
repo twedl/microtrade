@@ -230,28 +230,71 @@ def _sheet_to_layout(df: pl.DataFrame, sheet: str) -> tuple[tuple[Column, ...], 
     return tuple(columns), max_end
 
 
+def _check_unknown_physical(
+    keys: Mapping[str, str], columns: tuple[Column, ...], *, sheet: str, field: str
+) -> None:
+    """Raise if any key in `keys` is not a workbook physical column name.
+
+    Shared between rename/cast/parse overrides so stale config entries surface
+    at import time with a difflib suggestion, not silently at ingest.
+    """
+    physical_names = {c.physical_name for c in columns}
+    unknown = sorted(set(keys) - physical_names)
+    if not unknown:
+        return
+    suggestions = {name: difflib.get_close_matches(name, physical_names, n=1) for name in unknown}
+    hints = ", ".join(
+        f"{name!r} (did you mean {matches[0]!r}?)" if matches else repr(name)
+        for name, matches in suggestions.items()
+    )
+    raise SpecError(f"sheet {sheet!r}: {field} refers to unknown physical column(s): {hints}")
+
+
 def _apply_rename(
     columns: tuple[Column, ...], rename: Mapping[str, str], *, sheet: str
 ) -> tuple[Column, ...]:
-    """Stamp `logical_name` on each column whose `physical_name` is in `rename`.
-
-    A rename key that matches no column is a stale config entry (usually a
-    leftover from a workbook change); we raise so it surfaces at import
-    time, not silently at ingest.
-    """
-    physical_names = {c.physical_name for c in columns}
-    unknown = sorted(set(rename) - physical_names)
-    if unknown:
-        suggestions = {
-            name: difflib.get_close_matches(name, physical_names, n=1) for name in unknown
-        }
-        hints = ", ".join(
-            f"{name!r} (did you mean {matches[0]!r}?)" if matches else repr(name)
-            for name, matches in suggestions.items()
-        )
-        raise SpecError(f"sheet {sheet!r}: rename refers to unknown physical column(s): {hints}")
+    """Stamp `logical_name` on each column whose `physical_name` is in `rename`."""
+    _check_unknown_physical(rename, columns, sheet=sheet, field="rename")
     return tuple(
         replace(col, logical_name=rename[col.physical_name]) if col.physical_name in rename else col
+        for col in columns
+    )
+
+
+def _apply_cast(
+    columns: tuple[Column, ...], cast: Mapping[str, str], *, sheet: str
+) -> tuple[Column, ...]:
+    """Override `dtype` per column. Re-derives the default parse for the new
+    dtype so e.g. a Char column cast to Date picks up `yyyymmdd_to_date`
+    automatically; `_apply_parse` can still override explicitly after."""
+    _check_unknown_physical(cast, columns, sheet=sheet, field="cast")
+    return tuple(
+        replace(
+            col,
+            dtype=cast[col.physical_name],
+            parse=_PARSE_FOR_DTYPE.get(cast[col.physical_name]),
+        )
+        if col.physical_name in cast
+        else col
+        for col in columns
+    )
+
+
+def _apply_parse(
+    columns: tuple[Column, ...], parse_map: Mapping[str, str], *, sheet: str
+) -> tuple[Column, ...]:
+    """Override the `parse` name per column; only meaningful for Date columns."""
+    _check_unknown_physical(parse_map, columns, sheet=sheet, field="parse")
+    non_date = sorted(
+        c.physical_name for c in columns if c.physical_name in parse_map and c.dtype != "Date"
+    )
+    if non_date:
+        raise SpecError(
+            f"sheet {sheet!r}: parse override is only meaningful for Date columns; "
+            f"these are not Date after cast: {non_date}"
+        )
+    return tuple(
+        replace(col, parse=parse_map[col.physical_name]) if col.physical_name in parse_map else col
         for col in columns
     )
 
@@ -321,6 +364,10 @@ def read_workbook(workbook: Path, workbook_config: WorkbookConfig) -> dict[str, 
         columns, record_length = _sheet_to_layout(df, sheet_name)
         if sheet_config.rename:
             columns = _apply_rename(columns, sheet_config.rename, sheet=sheet_name)
+        if sheet_config.cast:
+            columns = _apply_cast(columns, sheet_config.cast, sheet=sheet_name)
+        if sheet_config.parse:
+            columns = _apply_parse(columns, sheet_config.parse, sheet=sheet_name)
         if trade_type in out:
             raise SpecError(
                 f"workbook {workbook.name}: sheets map multiple entries to trade_type "

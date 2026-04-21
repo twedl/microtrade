@@ -6,6 +6,23 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-04-21
+
+### Added
+
+- `SheetConfig.cast` — per-sheet `{physical_name: dtype}` override
+  applied at `import-spec` time. Upstream FWF specs frequently call
+  numeric/date columns `Char`; `cast` promotes them to one of the
+  canonical dtypes (`Utf8`, `Int64`, `Float64`, `Date`) in the emitted
+  YAML. Stale entries raise with a difflib suggestion.
+- `SheetConfig.parse` — per-sheet `{physical_name: parser_name}`
+  override for Date columns. The default is `yyyymmdd_to_date`; set
+  `yyyymm_to_date` (or future parsers) for non-standard date formats.
+  Raises if the override targets a non-Date column after cast.
+- `schema.DATE_PARSERS` constant — the canonical list of Date parser
+  names, consulted by the config layer so typos surface at load time
+  rather than at ingest.
+
 ## [0.1.5] - 2026-04-21
 
 ### Added
@@ -214,7 +231,8 @@ and CLI command stay `microtrade`.
   `inspect`) ship implemented; the package is fully typed (`py.typed`
   marker included in the wheel).
 
-[unreleased]: https://github.com/twedl/microtrade/compare/v0.1.5...HEAD
+[unreleased]: https://github.com/twedl/microtrade/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/twedl/microtrade/releases/tag/v0.1.6
 [0.1.5]: https://github.com/twedl/microtrade/releases/tag/v0.1.5
 [0.1.4]: https://github.com/twedl/microtrade/releases/tag/v0.1.4
 [0.1.3]: https://github.com/twedl/microtrade/releases/tag/v0.1.3

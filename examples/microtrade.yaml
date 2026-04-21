@@ -25,6 +25,13 @@ workbooks:
       SHEETNAME001:
         trade_type: imports
         filename_pattern: '^SHEETNAME001_(?P<year>\d{4})(?P<month>\d{2})(?P<flag>[NC])\.TXT\.zip$'
+        # The workbook declares `year_month` as Char; cast to Date so the
+        # combined dataset gets a real date column. `yyyymm` values need
+        # a parse override because the Date default is `yyyymmdd_to_date`.
+        cast:
+          year_month: Date
+        parse:
+          year_month: yyyymm_to_date
       SHEETNAME002:
         trade_type: exports_us
         filename_pattern: '^SHEETNAME002_(?P<year>\d{4})(?P<month>\d{2})(?P<flag>[NC])\.TXT\.zip$'

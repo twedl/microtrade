@@ -186,6 +186,164 @@ def test_read_workbook_applies_rename_from_config(schema_workbook: Path, tmp_pat
         assert col.logical_name is None
 
 
+def test_read_workbook_applies_cast_from_config(schema_workbook: Path, tmp_path: Path) -> None:
+    """`cast` overrides the workbook's declared dtype per column, and re-derives
+    the default parse so e.g. a column cast to Date automatically gets
+    `yyyymmdd_to_date`."""
+    import yaml as yaml_
+
+    cfg = {
+        "workbooks": {
+            schema_workbook.name: {
+                "effective_from": "2020-01",
+                "sheets": {
+                    sheet_title: {
+                        "trade_type": tt,
+                        "filename_pattern": default_filename_pattern(sheet_title),
+                        **(
+                            {"cast": {"country_coo": "Utf8", "value_usd": "Float64"}}
+                            if tt == "imports"
+                            else {}
+                        ),
+                    }
+                    for tt, sheet_title in SHEET_TITLES.items()
+                },
+            }
+        }
+    }
+    config_path = tmp_path / "microtrade.yaml"
+    config_path.write_text(yaml_.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    workbook_config = load_config(config_path).get_workbook(schema_workbook)
+
+    imports = read_workbook(schema_workbook, workbook_config)["imports"]
+    by_physical = {c.physical_name: c for c in imports.columns}
+    assert by_physical["value_usd"].dtype == "Float64"  # was Int64, now Float64
+    assert by_physical["country_coo"].dtype == "Utf8"  # no-op (already Utf8)
+    # Other imports columns untouched.
+    assert by_physical["qty_kg"].dtype == "Int64"
+
+
+def test_read_workbook_parse_override_targets_date_columns(
+    schema_workbook: Path, tmp_path: Path
+) -> None:
+    """`parse` overrides the default parser for a Date column. Casting `period`
+    to Date picks up `yyyymmdd_to_date` by default; the `parse` block swaps
+    in `yyyymm_to_date` for that single column."""
+    import yaml as yaml_
+
+    cfg = {
+        "workbooks": {
+            schema_workbook.name: {
+                "effective_from": "2020-01",
+                "sheets": {
+                    sheet_title: {
+                        "trade_type": tt,
+                        "filename_pattern": default_filename_pattern(sheet_title),
+                        **(
+                            {
+                                "cast": {"period": "Date"},
+                                "parse": {"period": "yyyymm_to_date"},
+                            }
+                            if tt == "imports"
+                            else {}
+                        ),
+                    }
+                    for tt, sheet_title in SHEET_TITLES.items()
+                },
+            }
+        }
+    }
+    config_path = tmp_path / "microtrade.yaml"
+    config_path.write_text(yaml_.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    workbook_config = load_config(config_path).get_workbook(schema_workbook)
+
+    imports = read_workbook(schema_workbook, workbook_config)["imports"]
+    period = next(c for c in imports.columns if c.physical_name == "period")
+    assert period.dtype == "Date"
+    assert period.parse == "yyyymm_to_date"
+
+
+def test_parse_override_on_non_date_column_raises(schema_workbook: Path, tmp_path: Path) -> None:
+    import yaml as yaml_
+
+    cfg = {
+        "workbooks": {
+            schema_workbook.name: {
+                "effective_from": "2020-01",
+                "sheets": {
+                    sheet_title: {
+                        "trade_type": tt,
+                        "filename_pattern": default_filename_pattern(sheet_title),
+                        **({"parse": {"hs_code": "yyyymmdd_to_date"}} if tt == "imports" else {}),
+                    }
+                    for tt, sheet_title in SHEET_TITLES.items()
+                },
+            }
+        }
+    }
+    config_path = tmp_path / "microtrade.yaml"
+    config_path.write_text(yaml_.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    workbook_config = load_config(config_path).get_workbook(schema_workbook)
+
+    with pytest.raises(SpecError, match="only meaningful for Date columns"):
+        read_workbook(schema_workbook, workbook_config)
+
+
+def test_cast_rejects_unknown_dtype(schema_workbook: Path, tmp_path: Path) -> None:
+    import yaml as yaml_
+
+    from microtrade.config import ConfigError
+
+    cfg = {
+        "workbooks": {
+            schema_workbook.name: {
+                "effective_from": "2020-01",
+                "sheets": {
+                    sheet_title: {
+                        "trade_type": tt,
+                        "filename_pattern": default_filename_pattern(sheet_title),
+                        **({"cast": {"value_usd": "Decimal"}} if tt == "imports" else {}),
+                    }
+                    for tt, sheet_title in SHEET_TITLES.items()
+                },
+            }
+        }
+    }
+    config_path = tmp_path / "microtrade.yaml"
+    config_path.write_text(yaml_.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="are not canonical dtypes"):
+        load_config(config_path)
+
+
+def test_read_workbook_rejects_cast_for_unknown_column(
+    schema_workbook: Path, tmp_path: Path
+) -> None:
+    import yaml as yaml_
+
+    cfg = {
+        "workbooks": {
+            schema_workbook.name: {
+                "effective_from": "2020-01",
+                "sheets": {
+                    sheet_title: {
+                        "trade_type": tt,
+                        "filename_pattern": default_filename_pattern(sheet_title),
+                        **({"cast": {"no_such_col": "Int64"}} if tt == "imports" else {}),
+                    }
+                    for tt, sheet_title in SHEET_TITLES.items()
+                },
+            }
+        }
+    }
+    config_path = tmp_path / "microtrade.yaml"
+    config_path.write_text(yaml_.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    workbook_config = load_config(config_path).get_workbook(schema_workbook)
+
+    with pytest.raises(SpecError, match="cast refers to unknown physical column"):
+        read_workbook(schema_workbook, workbook_config)
+
+
 def test_read_workbook_rejects_rename_for_unknown_column(
     schema_workbook: Path, tmp_path: Path
 ) -> None:

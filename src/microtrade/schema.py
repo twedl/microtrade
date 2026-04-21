@@ -22,6 +22,12 @@ TRADE_TYPES: tuple[str, ...] = ("imports", "exports_us", "exports_nonus")
 
 CANONICAL_DTYPES: frozenset[str] = frozenset({"Utf8", "Int64", "Float64", "Date"})
 
+# Parser names recognized by ingest for the `parse` field on a Column.
+# Currently only Date columns need a parse; strings/ints/floats use the
+# stdlib defaults. Keep in sync with `ingest._DATE_FORMATS` - config-layer
+# validation consults this list so typos surface at import-spec time.
+DATE_PARSERS: frozenset[str] = frozenset({"yyyymmdd_to_date", "yyyymm_to_date"})
+
 # Named groups that a Spec's `source.filename_pattern` may expose. `year`/`month`
 # are required so discovery can route files to partitions; `flag` is optional and
 # used purely for N/C dedup preference.

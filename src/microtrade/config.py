@@ -43,6 +43,8 @@ from typing import Any
 import yaml
 
 from microtrade.schema import (
+    CANONICAL_DTYPES,
+    DATE_PARSERS,
     TRADE_TYPES,
     validate_filename_pattern,
     validate_period_window,
@@ -67,6 +69,15 @@ class SheetConfig:
     # renames a column across workbook versions - the combined dataset sees
     # one stable logical column even as the physical name drifts.
     rename: Mapping[str, str] = field(default_factory=dict)
+    # Override the workbook's declared dtype for specific columns. Upstream
+    # FWF specs often call numeric columns `Char` (they're just character
+    # fields); `cast` promotes them to Int64/Float64/Date at import time.
+    # Keys are physical_name, values must be in CANONICAL_DTYPES.
+    cast: Mapping[str, str] = field(default_factory=dict)
+    # Override the parse-function name for specific columns (e.g. use
+    # `yyyymm_to_date` instead of the Date default `yyyymmdd_to_date`).
+    # Keys are physical_name, values must be in DATE_PARSERS.
+    parse: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         validate_filename_pattern(self.filename_pattern, error_cls=ConfigError)
@@ -82,7 +93,20 @@ class SheetConfig:
                 f"rename produces duplicate logical_name(s) {dupes}; each "
                 f"logical name may be used only once per sheet"
             )
+        bad_cast = sorted(v for v in self.cast.values() if v not in CANONICAL_DTYPES)
+        if bad_cast:
+            raise ConfigError(
+                f"cast targets {bad_cast} are not canonical dtypes; "
+                f"allowed: {sorted(CANONICAL_DTYPES)}"
+            )
+        bad_parse = sorted(v for v in self.parse.values() if v not in DATE_PARSERS)
+        if bad_parse:
+            raise ConfigError(
+                f"parse values {bad_parse} are unknown; allowed: {sorted(DATE_PARSERS)}"
+            )
         object.__setattr__(self, "rename", MappingProxyType(dict(self.rename)))
+        object.__setattr__(self, "cast", MappingProxyType(dict(self.cast)))
+        object.__setattr__(self, "parse", MappingProxyType(dict(self.parse)))
 
 
 @dataclass(frozen=True)
@@ -173,15 +197,25 @@ def _sheet_from_dict(workbook_name: str, sheet_name: str, data: dict[str, Any]) 
             f"workbook {workbook_name!r} sheet {sheet_name!r}: missing 'filename_pattern'"
         ) from exc
     trade_type = data.get("trade_type")
-    rename_raw = data.get("rename") or {}
-    if not isinstance(rename_raw, dict):
-        raise ConfigError(
-            f"workbook {workbook_name!r} sheet {sheet_name!r}: "
-            f"'rename' must be a physical -> logical mapping, got {type(rename_raw).__name__}"
-        )
-    rename = {str(k): str(v) for k, v in rename_raw.items()}
+    rename = _str_mapping(data, "rename", workbook_name=workbook_name, sheet_name=sheet_name)
+    cast = _str_mapping(data, "cast", workbook_name=workbook_name, sheet_name=sheet_name)
+    parse = _str_mapping(data, "parse", workbook_name=workbook_name, sheet_name=sheet_name)
     return SheetConfig(
         filename_pattern=pattern,
         trade_type=str(trade_type) if trade_type is not None else None,
         rename=rename,
+        cast=cast,
+        parse=parse,
     )
+
+
+def _str_mapping(
+    data: dict[str, Any], key: str, *, workbook_name: str, sheet_name: str
+) -> dict[str, str]:
+    raw = data.get(key) or {}
+    if not isinstance(raw, dict):
+        raise ConfigError(
+            f"workbook {workbook_name!r} sheet {sheet_name!r}: {key!r} must be a mapping, "
+            f"got {type(raw).__name__}"
+        )
+    return {str(k): str(v) for k, v in raw.items()}

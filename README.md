@@ -84,6 +84,17 @@ dataset. Each Spec stores both, ingest slices FWF bytes under
 `physical_name` and emits the parquet column under `logical_name` so
 consumers see one stable column even as upstream drifts.
 
+`cast` (optional, per sheet) overrides the workbook's declared dtype per
+column. Upstream FWF specs routinely label numeric or date fields as
+`Char`; use `cast` to promote them at import time, e.g.
+`cast: {value_usd: Int64, year_month: Date}`. Allowed targets: `Utf8`,
+`Int64`, `Float64`, `Date`.
+
+`parse` (optional, per sheet) overrides the parser for a Date column.
+The default is `yyyymmdd_to_date`; set
+`parse: {year_month: yyyymm_to_date}` for `YYYYMM` fields. Only
+meaningful for columns whose final dtype is Date.
+
 A worked example lives at [`examples/microtrade.yaml`](examples/microtrade.yaml),
 paired with `examples/microdata-layout.xls`.
 
