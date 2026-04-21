@@ -76,7 +76,7 @@ def test_ingest_respects_chunk_rows(imports_spec, tmp_path: Path) -> None:
 def test_ingest_nullable_blank_becomes_null(imports_spec, tmp_path: Path) -> None:
     # district_entry (col 4) is nullable; blank that column in one row.
     good_line = render_fwf_lines(imports_spec, n_rows=1, seed=0)[0]
-    col = {c.name: c for c in imports_spec.columns}["district_entry"]
+    col = {c.physical_name: c for c in imports_spec.columns}["district_entry"]
     blanked = (
         good_line[: col.start - 1] + (" " * col.length) + good_line[col.start - 1 + col.length :]
     )
@@ -90,7 +90,7 @@ def test_ingest_nullable_blank_becomes_null(imports_spec, tmp_path: Path) -> Non
 
 def test_ingest_blank_non_nullable_numeric_raises(imports_spec, tmp_path: Path) -> None:
     good_line = render_fwf_lines(imports_spec, n_rows=1, seed=0)[0]
-    col = {c.name: c for c in imports_spec.columns}["value_usd"]
+    col = {c.physical_name: c for c in imports_spec.columns}["value_usd"]
     blanked = (
         good_line[: col.start - 1] + (" " * col.length) + good_line[col.start - 1 + col.length :]
     )
@@ -102,7 +102,7 @@ def test_ingest_blank_non_nullable_numeric_raises(imports_spec, tmp_path: Path) 
 
 def test_ingest_garbage_in_numeric_raises_with_line_number(imports_spec, tmp_path: Path) -> None:
     good_line = render_fwf_lines(imports_spec, n_rows=2, seed=0)[0]
-    col = {c.name: c for c in imports_spec.columns}["value_usd"]
+    col = {c.physical_name: c for c in imports_spec.columns}["value_usd"]
     garbage = (
         good_line[: col.start - 1] + "ABCDEABCDEABCDE" + good_line[col.start - 1 + col.length :]
     )
@@ -195,9 +195,9 @@ def test_ingest_date_column_parses_yyyymmdd(tmp_path: Path) -> None:
         effective_from="2024-01",
         record_length=13,
         columns=(
-            Column(name="ref", start=1, length=5, dtype="Utf8", nullable=False),
+            Column(physical_name="ref", start=1, length=5, dtype="Utf8", nullable=False),
             Column(
-                name="entry_date",
+                physical_name="entry_date",
                 start=6,
                 length=8,
                 dtype="Date",
@@ -217,7 +217,7 @@ def test_ingest_date_column_parses_yyyymmdd(tmp_path: Path) -> None:
 
 def test_ingest_sink_captures_bad_row_and_continues(imports_spec, tmp_path: Path) -> None:
     good = render_fwf_lines(imports_spec, n_rows=3, seed=0)
-    col = {c.name: c for c in imports_spec.columns}["value_usd"]
+    col = {c.physical_name: c for c in imports_spec.columns}["value_usd"]
     bad = good[0][: col.start - 1] + "ABCDEABCDEABCDE" + good[0][col.start - 1 + col.length :]
     raw = _raw_input(tmp_path, [good[0], bad, good[1]])
 
@@ -236,7 +236,7 @@ def test_ingest_sink_captures_bad_row_and_continues(imports_spec, tmp_path: Path
 
 def test_ingest_sink_captures_blank_non_nullable(imports_spec, tmp_path: Path) -> None:
     good = render_fwf_lines(imports_spec, n_rows=1, seed=0)[0]
-    col = {c.name: c for c in imports_spec.columns}["value_usd"]
+    col = {c.physical_name: c for c in imports_spec.columns}["value_usd"]
     blanked = good[: col.start - 1] + (" " * col.length) + good[col.start - 1 + col.length :]
     raw = _raw_input(tmp_path, [blanked, good])
 

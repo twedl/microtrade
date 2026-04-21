@@ -409,7 +409,12 @@ def _print_inspect_row(line: str, spec: schema.Spec, line_no: int, *, annotated:
         return
     for col in spec.ordered_columns:
         chunk = line[col.start - 1 : col.start - 1 + col.length]
-        typer.echo(f"  {col.name:<24} [{col.start:>4}..{col.end:>4}] {col.dtype:<7} {chunk!r}")
+        label = (
+            col.physical_name
+            if col.logical_name is None
+            else f"{col.physical_name} -> {col.logical_name}"
+        )
+        typer.echo(f"  {label:<36} [{col.start:>4}..{col.end:>4}] {col.dtype:<7} {chunk!r}")
 
 
 def _latest_previous(spec_dir: Path, trade_type: str, effective_from: str) -> schema.Spec | None:
@@ -424,11 +429,18 @@ def _print_diff(previous: schema.Spec, diff: schema.SpecDiff) -> None:
         return
     typer.echo(f"  diff vs v{previous.effective_from}:")
     for col in diff.added:
-        typer.echo(f"    + {col.name} ({col.dtype}, start={col.start}, length={col.length})")
+        typer.echo(
+            f"    + {col.effective_name} ({col.dtype}, start={col.start}, length={col.length})"
+        )
     for col in diff.removed:
-        typer.echo(f"    - {col.name} ({col.dtype})")
+        typer.echo(f"    - {col.effective_name} ({col.dtype})")
     for old, new in diff.changed:
-        typer.echo(f"    ~ {old.name}: {old.dtype}/{old.length} -> {new.dtype}/{new.length}")
+        label = (
+            f"{old.effective_name} (physical {old.physical_name} -> {new.physical_name})"
+            if old.physical_name != new.physical_name
+            else old.effective_name
+        )
+        typer.echo(f"    ~ {label}: {old.dtype}/{old.length} -> {new.dtype}/{new.length}")
 
 
 def _print_summary(summary: pipeline.RunSummary) -> None:

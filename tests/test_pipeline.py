@@ -224,7 +224,7 @@ def test_pipeline_row_level_error_logged_to_quality_issues(prepared_env) -> None
         "imports"
     ]
     good = render_fwf_lines(spec, n_rows=3, seed=0)
-    col = {c.name: c for c in spec.columns}["value_usd"]
+    col = {c.physical_name: c for c in spec.columns}["value_usd"]
     bad_line = good[0][: col.start - 1] + "ABCDEABCDEABCDE" + good[0][col.start - 1 + col.length :]
     make_zip_input(target, [good[0], bad_line, good[1]])
 
@@ -255,7 +255,7 @@ def _make_bad_imports_zip(env: dict[str, Path], n_good: int, n_bad: int) -> Path
     spec = excel_spec.read_workbook(workbook, _workbook_config(env["tmp"], workbook, "2020-01"))[
         "imports"
     ]
-    col = {c.name: c for c in spec.columns}["value_usd"]
+    col = {c.physical_name: c for c in spec.columns}["value_usd"]
     good = render_fwf_lines(spec, n_rows=n_good + n_bad, seed=0)
     lines = list(good[:n_good])
     for src in good[n_good : n_good + n_bad]:

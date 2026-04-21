@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,17 +33,25 @@ _PERIOD_RE = re.compile(r"^\d{4}-\d{2}$")
 
 @dataclass(frozen=True)
 class Column:
-    name: str
+    physical_name: str
     start: int
     length: int
     dtype: str
     nullable: bool = True
     parse: str | None = None
     description: str | None = None
+    # Stable name across workbook versions; `canonical_columns` merges on
+    # this, so a rename upstream doesn't fork the dataset.
+    logical_name: str | None = None
 
     @property
     def end(self) -> int:
         return self.start + self.length - 1
+
+    @property
+    def effective_name(self) -> str:
+        """Stable name across spec versions; falls back to `physical_name`."""
+        return self.logical_name if self.logical_name is not None else self.physical_name
 
 
 @dataclass(frozen=True)
@@ -172,24 +181,31 @@ def validate_spec(spec: Spec) -> None:
     if not spec.columns:
         raise SpecError("spec has no columns")
 
-    seen_names: set[str] = set()
+    seen_physical: set[str] = set()
+    seen_logical: set[str] = set()
     prev_end = 0
     for col in sorted(spec.columns, key=lambda c: c.start):
-        if col.name in seen_names:
-            raise SpecError(f"duplicate column name {col.name!r}")
-        seen_names.add(col.name)
+        if col.physical_name in seen_physical:
+            raise SpecError(f"duplicate column physical_name {col.physical_name!r}")
+        seen_physical.add(col.physical_name)
+        if col.effective_name in seen_logical:
+            raise SpecError(
+                f"duplicate column logical_name {col.effective_name!r} "
+                f"(physical_name {col.physical_name!r})"
+            )
+        seen_logical.add(col.effective_name)
         if col.dtype not in CANONICAL_DTYPES:
             raise SpecError(
-                f"column {col.name!r} has non-canonical dtype {col.dtype!r}; "
+                f"column {col.physical_name!r} has non-canonical dtype {col.dtype!r}; "
                 f"allowed: {sorted(CANONICAL_DTYPES)}"
             )
         if col.start <= prev_end:
             raise SpecError(
-                f"column {col.name!r} overlaps previous (start={col.start}, "
+                f"column {col.physical_name!r} overlaps previous (start={col.start}, "
                 f"previous end={prev_end})"
             )
         if col.length <= 0:
-            raise SpecError(f"column {col.name!r} has non-positive length {col.length}")
+            raise SpecError(f"column {col.physical_name!r} has non-positive length {col.length}")
         prev_end = col.end
 
     if spec.record_length < spec.min_record_length:
@@ -199,14 +215,27 @@ def validate_spec(spec: Spec) -> None:
         )
 
 
+def _opt_str(data: Mapping[str, Any], key: str) -> str | None:
+    """Read an optional string from a dict, returning None when absent or empty.
+
+    Used for round-tripping nullable text fields through YAML where the
+    serializer only emits the key when the value is non-None, so a missing
+    key and an explicit None are indistinguishable on read-back.
+    """
+    value = data.get(key)
+    return str(value) if value else None
+
+
 def _column_to_dict(col: Column) -> dict[str, Any]:
     out: dict[str, Any] = {
-        "name": col.name,
+        "physical_name": col.physical_name,
         "start": col.start,
         "length": col.length,
         "dtype": col.dtype,
         "nullable": col.nullable,
     }
+    if col.logical_name is not None:
+        out["logical_name"] = col.logical_name
     if col.parse is not None:
         out["parse"] = col.parse
     if col.description is not None:
@@ -216,13 +245,14 @@ def _column_to_dict(col: Column) -> dict[str, Any]:
 
 def _column_from_dict(data: dict[str, Any]) -> Column:
     return Column(
-        name=str(data["name"]),
+        physical_name=str(data["physical_name"]),
         start=int(data["start"]),
         length=int(data["length"]),
         dtype=str(data["dtype"]),
         nullable=bool(data.get("nullable", True)),
         parse=data.get("parse"),
         description=data.get("description"),
+        logical_name=_opt_str(data, "logical_name"),
     )
 
 
@@ -262,14 +292,8 @@ def spec_from_dict(data: dict[str, Any]) -> Spec:
             sha256=str(source_data["sha256"]),
             sheet=str(source_data["sheet"]),
             imported_at=str(source_data["imported_at"]),
-            workbook_id=(
-                str(source_data["workbook_id"]) if source_data.get("workbook_id") else None
-            ),
-            filename_pattern=(
-                str(source_data["filename_pattern"])
-                if source_data.get("filename_pattern")
-                else None
-            ),
+            workbook_id=_opt_str(source_data, "workbook_id"),
+            filename_pattern=_opt_str(source_data, "filename_pattern"),
         )
         if source_data is not None
         else None
@@ -287,7 +311,7 @@ def spec_from_dict(data: dict[str, Any]) -> Spec:
         source=source,
         derived=derived,
         partition_by=tuple(data.get("partition_by", ("year", "month"))),
-        effective_to=(str(data["effective_to"]) if data.get("effective_to") else None),
+        effective_to=_opt_str(data, "effective_to"),
     )
     validate_spec(spec)
     return spec
@@ -392,30 +416,29 @@ class CanonicalColumn:
 def canonical_columns(specs: list[Spec]) -> tuple[CanonicalColumn, ...]:
     """Compute the union of columns across a trade type's committed specs.
 
-    Columns are ordered by first appearance. When a column's dtype or
-    nullability changes between versions, the latest spec wins; the dtype
-    must stay in `CANONICAL_DTYPES`. Raises `SpecError` if two specs
-    disagree on a column's dtype (a widening change we don't auto-resolve).
+    Columns merge on `effective_name` so a physical rename declared via
+    `logical_name` resolves to a single canonical column. Columns are
+    ordered by first appearance. When a column's dtype changes between
+    versions, `SpecError` is raised (widening we don't auto-resolve);
+    nullability widens (once nullable, always nullable in the canonical view).
     """
     ordered_names: list[str] = []
     seen: dict[str, CanonicalColumn] = {}
     for spec in sorted(specs, key=lambda s: s.effective_from):
         for col in spec.ordered_columns:
-            existing = seen.get(col.name)
+            name = col.effective_name
+            existing = seen.get(name)
             if existing is None:
-                ordered_names.append(col.name)
-                seen[col.name] = CanonicalColumn(
-                    name=col.name, dtype=col.dtype, nullable=col.nullable
-                )
+                ordered_names.append(name)
+                seen[name] = CanonicalColumn(name=name, dtype=col.dtype, nullable=col.nullable)
                 continue
             if existing.dtype != col.dtype:
                 raise SpecError(
-                    f"column {col.name!r} changes dtype across spec versions: "
+                    f"column {name!r} changes dtype across spec versions: "
                     f"{existing.dtype!r} -> {col.dtype!r}"
                 )
-            # Widen nullability: once nullable, always nullable in the canonical view.
-            seen[col.name] = CanonicalColumn(
-                name=col.name,
+            seen[name] = CanonicalColumn(
+                name=name,
                 dtype=col.dtype,
                 nullable=existing.nullable or col.nullable,
             )
@@ -434,8 +457,10 @@ class SpecDiff:
 
 
 def diff_specs(previous: Spec, current: Spec) -> SpecDiff:
-    prev_by_name = {c.name: c for c in previous.columns}
-    curr_by_name = {c.name: c for c in current.columns}
+    """Diff two specs by `effective_name` so a physical rename (same
+    `logical_name`) appears as a change, not an add+remove."""
+    prev_by_name = {c.effective_name: c for c in previous.columns}
+    curr_by_name = {c.effective_name: c for c in current.columns}
 
     added = tuple(c for name, c in curr_by_name.items() if name not in prev_by_name)
     removed = tuple(c for name, c in prev_by_name.items() if name not in curr_by_name)

@@ -14,8 +14,9 @@ hot path.
 
 from __future__ import annotations
 
+import difflib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -160,8 +161,8 @@ def _row_to_column(row: tuple[Any, ...], idx: _ColumnIndex, *, sheet: str, line_
     where = f"sheet {sheet!r} row {line_no}"
     start = _cell_int(row[idx.position], field=f"{where} Position")
     length = _cell_int(row[idx.length], field=f"{where} Length")
-    name = _cell_str(row[idx.description])
-    if not name:
+    physical_name = _cell_str(row[idx.description])
+    if not physical_name:
         raise SpecError(f"{where}: Description is empty")
     dtype = normalize_dtype(_cell_str(row[idx.type_]) or "")
     nullable = (
@@ -172,7 +173,7 @@ def _row_to_column(row: tuple[Any, ...], idx: _ColumnIndex, *, sheet: str, line_
     parse_raw = row[idx.parse] if idx.parse is not None else None
     parse = _cell_str(parse_raw) if parse_raw not in (None, "") else _PARSE_FOR_DTYPE.get(dtype)
     return Column(
-        name=name,
+        physical_name=physical_name,
         start=start,
         length=length,
         dtype=dtype,
@@ -229,9 +230,35 @@ def _sheet_to_layout(df: pl.DataFrame, sheet: str) -> tuple[tuple[Column, ...], 
     return tuple(columns), max_end
 
 
+def _apply_rename(
+    columns: tuple[Column, ...], rename: Mapping[str, str], *, sheet: str
+) -> tuple[Column, ...]:
+    """Stamp `logical_name` on each column whose `physical_name` is in `rename`.
+
+    A rename key that matches no column is a stale config entry (usually a
+    leftover from a workbook change); we raise so it surfaces at import
+    time, not silently at ingest.
+    """
+    physical_names = {c.physical_name for c in columns}
+    unknown = sorted(set(rename) - physical_names)
+    if unknown:
+        suggestions = {
+            name: difflib.get_close_matches(name, physical_names, n=1) for name in unknown
+        }
+        hints = ", ".join(
+            f"{name!r} (did you mean {matches[0]!r}?)" if matches else repr(name)
+            for name, matches in suggestions.items()
+        )
+        raise SpecError(f"sheet {sheet!r}: rename refers to unknown physical column(s): {hints}")
+    return tuple(
+        replace(col, logical_name=rename[col.physical_name]) if col.physical_name in rename else col
+        for col in columns
+    )
+
+
 def _derived_for(columns: tuple[Column, ...]) -> tuple[tuple[str, str], ...]:
     for col in columns:
-        if col.name == "period" and col.parse in {"yyyymm_to_date", "yyyymmdd_to_date"}:
+        if col.effective_name == "period" and col.parse in {"yyyymm_to_date", "yyyymmdd_to_date"}:
             return (("year", "year(period)"), ("month", "month(period)"))
     return ()
 
@@ -292,6 +319,8 @@ def read_workbook(workbook: Path, workbook_config: WorkbookConfig) -> dict[str, 
             )
         df = sheets[sheet_name]
         columns, record_length = _sheet_to_layout(df, sheet_name)
+        if sheet_config.rename:
+            columns = _apply_rename(columns, sheet_config.rename, sheet=sheet_name)
         if trade_type in out:
             raise SpecError(
                 f"workbook {workbook.name}: sheets map multiple entries to trade_type "

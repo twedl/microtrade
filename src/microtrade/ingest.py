@@ -73,9 +73,10 @@ def build_arrow_schema(spec: Spec) -> pa.Schema:
     for col in spec.ordered_columns:
         if col.dtype not in _TO_PYARROW:
             raise IngestError(
-                f"column {col.name!r} has dtype {col.dtype!r} with no pyarrow mapping"
+                f"column {col.physical_name!r} has dtype {col.dtype!r} with no pyarrow mapping"
             )
-        fields.append(pa.field(col.name, _TO_PYARROW[col.dtype], nullable=col.nullable))
+        # Parquet field uses the logical name so merged datasets stay stable.
+        fields.append(pa.field(col.effective_name, _TO_PYARROW[col.dtype], nullable=col.nullable))
     return pa.schema(fields)
 
 
@@ -143,7 +144,7 @@ def _stream_lines(
     n = len(columns_ordered)
     slices = [slice(c.start - 1, c.start - 1 + c.length) for c in columns_ordered]
     parsers = [_make_parser(c) for c in columns_ordered]
-    col_names = [c.name for c in columns_ordered]
+    col_names = [c.effective_name for c in columns_ordered]
     field_types = [arrow_schema.field(i).type for i in range(n)]
 
     # Per-line comparisons resolve against locals; `record_length` is an upper
@@ -262,7 +263,7 @@ def _make_parser(col: Column) -> Callable[[str], object]:
         fmt = _DATE_FORMATS.get(parse_name)
         if fmt is None:
             raise IngestError(
-                f"column {col.name!r}: unknown Date parse {parse_name!r}; "
+                f"column {col.physical_name!r}: unknown Date parse {parse_name!r}; "
                 f"known: {sorted(_DATE_FORMATS)}"
             )
 
@@ -279,7 +280,7 @@ def _make_parser(col: Column) -> Callable[[str], object]:
 
         return parse_date
 
-    raise IngestError(f"column {col.name!r}: unsupported dtype {col.dtype!r}")
+    raise IngestError(f"column {col.physical_name!r}: unsupported dtype {col.dtype!r}")
 
 
 def _build_batch(

@@ -44,7 +44,7 @@ def test_read_workbook_produces_spec_per_trade_type(
     assert imports.trade_type == "imports"
     assert imports.effective_from == "2020-01"
     assert imports.record_length == 53
-    assert [c.name for c in imports.columns] == [
+    assert [c.physical_name for c in imports.columns] == [
         "period",
         "hs_code",
         "country_coo",
@@ -109,7 +109,7 @@ def test_read_workbook_skips_blank_filler_rows(tmp_path: Path) -> None:
 
     specs = read_workbook(wb_path, workbook_config)
     imports = specs["imports"]
-    assert [c.name for c in imports.columns] == ["code", "value"]
+    assert [c.physical_name for c in imports.columns] == ["code", "value"]
     assert [c.dtype for c in imports.columns] == ["Utf8", "Int64"]
     assert imports.record_length == 19
 
@@ -144,8 +144,110 @@ def test_read_workbook_honors_position_only_sentinel_row(tmp_path: Path) -> None
 
     specs = read_workbook(wb_path, workbook_config)
     imports = specs["imports"]
-    assert [c.name for c in imports.columns] == ["code", "value"]
+    assert [c.physical_name for c in imports.columns] == ["code", "value"]
     assert imports.record_length == 16
+
+
+def test_read_workbook_applies_rename_from_config(schema_workbook: Path, tmp_path: Path) -> None:
+    """A `rename` map in microtrade.yaml stamps `logical_name` on matching columns
+    so the combined dataset sees a stable logical name even when physical names
+    differ across workbook versions."""
+    import yaml as yaml_
+
+    cfg = {
+        "workbooks": {
+            schema_workbook.name: {
+                "effective_from": "2020-01",
+                "sheets": {
+                    sheet_title: {
+                        "trade_type": tt,
+                        "filename_pattern": default_filename_pattern(sheet_title),
+                        **({"rename": {"value_usd": "customs_value"}} if tt == "imports" else {}),
+                    }
+                    for tt, sheet_title in SHEET_TITLES.items()
+                },
+            }
+        }
+    }
+    config_path = tmp_path / "microtrade.yaml"
+    config_path.write_text(yaml_.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    workbook_config = load_config(config_path).get_workbook(schema_workbook)
+
+    specs = read_workbook(schema_workbook, workbook_config)
+    imports = specs["imports"]
+    by_physical = {c.physical_name: c for c in imports.columns}
+    assert by_physical["value_usd"].logical_name == "customs_value"
+    assert by_physical["value_usd"].effective_name == "customs_value"
+    # Other imports columns untouched.
+    assert by_physical["period"].logical_name is None
+    assert by_physical["period"].effective_name == "period"
+    # Sheets without a rename map remain logical_name-free.
+    for col in specs["exports_us"].columns:
+        assert col.logical_name is None
+
+
+def test_read_workbook_rejects_rename_for_unknown_column(
+    schema_workbook: Path, tmp_path: Path
+) -> None:
+    import yaml as yaml_
+
+    cfg = {
+        "workbooks": {
+            schema_workbook.name: {
+                "effective_from": "2020-01",
+                "sheets": {
+                    sheet_title: {
+                        "trade_type": tt,
+                        "filename_pattern": default_filename_pattern(sheet_title),
+                        **({"rename": {"no_such_column": "something"}} if tt == "imports" else {}),
+                    }
+                    for tt, sheet_title in SHEET_TITLES.items()
+                },
+            }
+        }
+    }
+    config_path = tmp_path / "microtrade.yaml"
+    config_path.write_text(yaml_.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    workbook_config = load_config(config_path).get_workbook(schema_workbook)
+
+    with pytest.raises(SpecError, match="unknown physical column"):
+        read_workbook(schema_workbook, workbook_config)
+
+
+def test_canonical_columns_merges_on_logical_name(
+    schema_workbook: Path, workbook_config: WorkbookConfig
+) -> None:
+    """Across spec versions, declaring `logical_name` on the newer spec
+    pointing at the older spec's physical_name collapses the two into one
+    canonical column. Models the real workflow: upstream renames `value_usd`
+    -> `customs_value`; the user sets `logical_name=value_usd` on the new
+    spec so the combined dataset keeps the stable name."""
+    from dataclasses import replace
+
+    imports_v1 = read_workbook(schema_workbook, workbook_config)["imports"]
+    imports_v1 = replace(imports_v1, effective_to="2022-12")
+
+    # Simulate v2: upstream renamed `value_usd` to `customs_value`, but the
+    # logical_name carries the old name forward.
+    new_columns = tuple(
+        replace(col, physical_name="customs_value", logical_name="value_usd")
+        if col.physical_name == "value_usd"
+        else col
+        for col in imports_v1.columns
+    )
+    imports_v2 = replace(
+        imports_v1,
+        effective_from="2023-01",
+        effective_to=None,
+        version="2023-01",
+        columns=new_columns,
+    )
+
+    canonical = schema.canonical_columns([imports_v1, imports_v2])
+    names = [c.name for c in canonical]
+    assert "value_usd" in names
+    assert "customs_value" not in names
+    assert len(names) == len(imports_v1.columns)
 
 
 def test_read_workbook_bakes_effective_to(tmp_path: Path) -> None:
@@ -390,8 +492,8 @@ def test_validate_specs_reports_invalid_yaml(
         "effective_from: '2020-01'\n"
         "record_length: 10\n"
         "columns:\n"
-        "  - {name: a, start: 1, length: 5, dtype: Utf8}\n"
-        "  - {name: b, start: 4, length: 5, dtype: Utf8}\n",
+        "  - {physical_name: a, start: 1, length: 5, dtype: Utf8}\n"
+        "  - {physical_name: b, start: 4, length: 5, dtype: Utf8}\n",
         encoding="utf-8",
     )
 
@@ -488,10 +590,10 @@ def test_validate_specs_reports_dtype_conflict_across_versions(
     v2 = read_workbook(schema_workbook, wbcfg_late)["imports"]
     new_cols = tuple(
         schema.Column(
-            name=c.name,
+            physical_name=c.physical_name,
             start=c.start,
             length=c.length,
-            dtype="Float64" if c.name == "value_usd" else c.dtype,
+            dtype="Float64" if c.physical_name == "value_usd" else c.dtype,
             nullable=c.nullable,
             parse=c.parse,
             description=c.description,
@@ -541,8 +643,8 @@ def test_validate_specs_continues_across_trade_types(
         "effective_from: '2020-01'\n"
         "record_length: 10\n"
         "columns:\n"
-        "  - {name: a, start: 1, length: 5, dtype: Utf8}\n"
-        "  - {name: b, start: 4, length: 5, dtype: Utf8}\n",
+        "  - {physical_name: a, start: 1, length: 5, dtype: Utf8}\n"
+        "  - {physical_name: b, start: 4, length: 5, dtype: Utf8}\n",
         encoding="utf-8",
     )
 

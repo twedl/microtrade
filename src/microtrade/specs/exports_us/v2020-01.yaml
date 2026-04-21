@@ -1,99 +1,102 @@
 trade_type: exports_us
 version: 2020-01
 effective_from: 2020-01
-record_length: 207
+effective_to: 2023-12
+record_length: 208
 source:
   workbook: microdata-layout.xls
   sha256: b49821ef787426e9bed8a39e1f123bd6c408276946b1ef0b9503bee9d4634823
   sheet: SHEETNAME002
-  imported_at: '2026-04-17T12:57:10+00:00'
+  imported_at: '2026-04-21T16:26:25+00:00'
+  workbook_id: MICRODATA2020
+  filename_pattern: ^SHEETNAME002_(?P<year>\d{4})(?P<month>\d{2})(?P<flag>[NC])\.TXT\.zip$
 columns:
-- name: year_month
+- physical_name: year_month
   start: 1
   length: 6
   dtype: Utf8
   nullable: true
-- name: col2
+- physical_name: col2
   start: 8
   length: 2
   dtype: Utf8
   nullable: true
-- name: hs8
+- physical_name: hs8
   start: 11
   length: 8
   dtype: Utf8
   nullable: true
-- name: col4
+- physical_name: col4
   start: 20
   length: 1
   dtype: Utf8
   nullable: true
-- name: col5
+- physical_name: col5
   start: 22
   length: 2
   dtype: Utf8
   nullable: true
-- name: col6
+- physical_name: col6
   start: 25
   length: 2
   dtype: Utf8
   nullable: true
-- name: col7
+- physical_name: col7
   start: 28
   length: 2
   dtype: Utf8
   nullable: true
-- name: col8
+- physical_name: col8
   start: 31
   length: 2
   dtype: Utf8
   nullable: true
-- name: col9
+- physical_name: col9
   start: 34
   length: 3
   dtype: Utf8
   nullable: true
-- name: col10
+- physical_name: col10
   start: 38
   length: 1
   dtype: Utf8
   nullable: true
-- name: col11
+- physical_name: col11
   start: 40
   length: 30
   dtype: Utf8
   nullable: true
-- name: col12
+- physical_name: col12
   start: 71
   length: 3
   dtype: Utf8
   nullable: true
-- name: col13
+- physical_name: col13
   start: 76
   length: 15
   dtype: Utf8
   nullable: true
-- name: col14
+- physical_name: col14
   start: 92
   length: 60
   dtype: Utf8
   nullable: true
-- name: col15
+- physical_name: col15
   start: 153
   length: 13
   dtype: Utf8
   nullable: true
-- name: col16
+- physical_name: col16
   start: 167
   length: 13
   dtype: Utf8
   nullable: true
-- name: col17
+- physical_name: col17
   start: 181
   length: 13
   dtype: Utf8
   nullable: true
-- name: col18
+- physical_name: col18
   start: 195
   length: 13
   dtype: Utf8

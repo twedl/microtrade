@@ -163,25 +163,25 @@ def build_workbook(path: Path, sheets: tuple[SheetSpec, ...] = DEFAULT_SHEETS) -
 
 
 def _gen_string(col: Column, rng: random.Random, row_idx: int) -> str:
-    if col.name == "period":
+    if col.physical_name == "period":
         year = rng.choice([2023, 2024, 2025])
         month = rng.randint(1, 12)
         return f"{year}{month:02d}"
-    if col.name.startswith("country") or col.name == "country_dest":
+    if col.physical_name.startswith("country") or col.physical_name == "country_dest":
         return rng.choice(["USA", "CHN", "MEX", "CAN", "DEU", "JPN", "KOR"])
-    if col.name in {"hs_code", "schedule_b"}:
+    if col.physical_name in {"hs_code", "schedule_b"}:
         return "".join(rng.choices(string.digits, k=min(col.length, 10)))
-    if col.name == "transport_mode":
+    if col.physical_name == "transport_mode":
         return rng.choice(["10", "20", "30", "40", "50"])
-    if col.name == "district_entry":
+    if col.physical_name == "district_entry":
         return f"{rng.randint(1000, 9999)}"
     return "".join(rng.choices(string.ascii_uppercase + string.digits, k=min(col.length, 8)))
 
 
 def _gen_int(col: Column, rng: random.Random, row_idx: int) -> int:
-    if col.name == "value_usd" or col.name.startswith("value"):
+    if col.physical_name == "value_usd" or col.physical_name.startswith("value"):
         return rng.randint(100, 10_000_000)
-    if col.name.startswith("qty"):
+    if col.physical_name.startswith("qty"):
         return rng.randint(1, 100_000)
     return rng.randint(0, 10**9)
 
@@ -245,8 +245,8 @@ def _render_line(
     """
     buf = bytearray(b" " * spec.record_length)
     for col in ordered:
-        if overrides is not None and col.name in overrides:
-            chunk = overrides[col.name]
+        if overrides is not None and col.physical_name in overrides:
+            chunk = overrides[col.physical_name]
         else:
             chunk = _format_field(col, _render_value(col, rng, row_idx))
         buf[col.start - 1 : col.start - 1 + col.length] = chunk.encode("utf-8")
@@ -261,7 +261,9 @@ def _bad_rows(spec: Spec, rng: random.Random, ordered: list[Column]) -> list[str
     nullable_cols = [c for c in ordered if c.nullable]
     if nullable_cols:
         target = nullable_cols[0]
-        bad.append(_render_line(spec, ordered, rng, -1, {target.name: " " * target.length}))
+        bad.append(
+            _render_line(spec, ordered, rng, -1, {target.physical_name: " " * target.length})
+        )
 
     # Line truncated by 5 characters (should be rejected by record_length check).
     bad.append(_render_line(spec, ordered, rng, -2)[:-5])
@@ -271,7 +273,9 @@ def _bad_rows(spec: Spec, rng: random.Random, ordered: list[Column]) -> list[str
     if numeric_cols:
         target = numeric_cols[0]
         bad.append(
-            _render_line(spec, ordered, rng, -3, {target.name: _format_field(target, "ABCDE")})
+            _render_line(
+                spec, ordered, rng, -3, {target.physical_name: _format_field(target, "ABCDE")}
+            )
         )
 
     return bad

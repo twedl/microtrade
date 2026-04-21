@@ -1,184 +1,187 @@
 trade_type: imports
 version: 2020-01
 effective_from: 2020-01
-record_length: 357
+effective_to: 2023-12
+record_length: 358
 source:
   workbook: microdata-layout.xls
   sha256: b49821ef787426e9bed8a39e1f123bd6c408276946b1ef0b9503bee9d4634823
   sheet: SHEETNAME001
-  imported_at: '2026-04-17T12:57:10+00:00'
+  imported_at: '2026-04-21T16:26:25+00:00'
+  workbook_id: MICRODATA2020
+  filename_pattern: ^SHEETNAME001_(?P<year>\d{4})(?P<month>\d{2})(?P<flag>[NC])\.TXT\.zip$
 columns:
-- name: year_month
+- physical_name: year_month
   start: 1
   length: 6
   dtype: Utf8
   nullable: true
-- name: col2
+- physical_name: col2
   start: 8
   length: 2
   dtype: Utf8
   nullable: true
-- name: col3
+- physical_name: col3
   start: 11
   length: 2
   dtype: Utf8
   nullable: true
-- name: hs10
+- physical_name: hs10
   start: 14
   length: 10
   dtype: Utf8
   nullable: true
-- name: col5
+- physical_name: col5
   start: 25
   length: 3
   dtype: Utf8
   nullable: true
-- name: col6
+- physical_name: col6
   start: 29
   length: 2
   dtype: Utf8
   nullable: true
-- name: col7
+- physical_name: col7
   start: 32
   length: 2
   dtype: Utf8
   nullable: true
-- name: col8
+- physical_name: col8
   start: 35
   length: 2
   dtype: Utf8
   nullable: true
-- name: col9
+- physical_name: col9
   start: 38
   length: 2
   dtype: Utf8
   nullable: true
-- name: col10
+- physical_name: col10
   start: 41
   length: 1
   dtype: Utf8
   nullable: true
-- name: col11
+- physical_name: col11
   start: 43
   length: 3
   dtype: Utf8
   nullable: true
-- name: col12
+- physical_name: col12
   start: 47
   length: 25
   dtype: Utf8
   nullable: true
-- name: col13
+- physical_name: col13
   start: 73
   length: 2
   dtype: Utf8
   nullable: true
-- name: col14
+- physical_name: col14
   start: 76
   length: 4
   dtype: Utf8
   nullable: true
-- name: col15
+- physical_name: col15
   start: 81
   length: 3
   dtype: Utf8
   nullable: true
-- name: col16
+- physical_name: col16
   start: 85
   length: 16
   dtype: Utf8
   nullable: true
-- name: col17
+- physical_name: col17
   start: 102
   length: 2
   dtype: Utf8
   nullable: true
-- name: col18
+- physical_name: col18
   start: 105
   length: 4
   dtype: Utf8
   nullable: true
-- name: col19
+- physical_name: col19
   start: 110
   length: 30
   dtype: Utf8
   nullable: true
-- name: col20
+- physical_name: col20
   start: 141
   length: 7
   dtype: Utf8
   nullable: true
-- name: col21
+- physical_name: col21
   start: 149
   length: 5
   dtype: Utf8
   nullable: true
-- name: col22
+- physical_name: col22
   start: 155
   length: 4
   dtype: Utf8
   nullable: true
-- name: col23
+- physical_name: col23
   start: 160
   length: 4
   dtype: Utf8
   nullable: true
-- name: col24
+- physical_name: col24
   start: 165
   length: 8
   dtype: Utf8
   nullable: true
-- name: col25
+- physical_name: col25
   start: 174
   length: 9
   dtype: Utf8
   nullable: true
-- name: col26
+- physical_name: col26
   start: 184
   length: 30
   dtype: Utf8
   nullable: true
-- name: col27
+- physical_name: col27
   start: 216
   length: 30
   dtype: Utf8
   nullable: true
-- name: col28
+- physical_name: col28
   start: 247
   length: 13
   dtype: Int64
   nullable: true
-- name: col29
+- physical_name: col29
   start: 261
   length: 13
   dtype: Int64
   nullable: true
-- name: col30
+- physical_name: col30
   start: 275
   length: 13
   dtype: Int64
   nullable: true
-- name: col31
+- physical_name: col31
   start: 289
   length: 13
   dtype: Int64
   nullable: true
-- name: col32
+- physical_name: col32
   start: 303
   length: 13
   dtype: Int64
   nullable: true
-- name: col33
+- physical_name: col33
   start: 317
   length: 13
   dtype: Int64
   nullable: true
-- name: col34
+- physical_name: col34
   start: 331
   length: 13
   dtype: Int64
   nullable: true
-- name: col35
+- physical_name: col35
   start: 345
   length: 13
   dtype: Int64

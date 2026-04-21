@@ -6,6 +6,39 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-04-21
+
+### Added
+
+- `Column.logical_name` — stable name for a column across workbook
+  versions. `effective_name` returns `logical_name or physical_name`.
+  `canonical_columns` and `diff_specs` key on `effective_name`, and
+  `ingest.build_arrow_schema` emits parquet columns under the logical
+  name so the combined dataset sees a single column even when upstream
+  renames the underlying FWF column.
+- `SheetConfig.rename` (in `microtrade.yaml`) — a physical-to-logical
+  mapping applied at import time. `microtrade import-spec` stamps
+  `logical_name` on matching columns, raises `SpecError` if a rename
+  entry refers to a column the workbook doesn't declare (with
+  `difflib` suggestions for likely typos), and rejects duplicate
+  logical names per sheet.
+- `examples/microtrade.yaml` paired with `examples/microdata-layout.xls`,
+  showing both the baseline flow and the `rename:` feature. README now
+  points at it.
+
+### Changed
+
+- **Breaking (YAML format):** `Column.name` renamed to
+  `Column.physical_name` throughout. The spec YAMLs now use
+  `physical_name:` instead of `name:` for each column. Regenerate with
+  `microtrade import-spec` or hand-rename the field in any committed
+  specs.
+- `_opt_str` helper in `schema.py` collapses four copies of the
+  optional-string-round-trip idiom (`workbook_id`, `filename_pattern`,
+  `logical_name`, `effective_to`).
+- `SheetConfig.rename` is now truly immutable once constructed
+  (`MappingProxyType`), matching the surrounding `frozen=True` semantics.
+
 ## [0.1.4] - 2026-04-20
 
 ### Changed
@@ -181,7 +214,8 @@ and CLI command stay `microtrade`.
   `inspect`) ship implemented; the package is fully typed (`py.typed`
   marker included in the wheel).
 
-[unreleased]: https://github.com/twedl/microtrade/compare/v0.1.4...HEAD
+[unreleased]: https://github.com/twedl/microtrade/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/twedl/microtrade/releases/tag/v0.1.5
 [0.1.4]: https://github.com/twedl/microtrade/releases/tag/v0.1.4
 [0.1.3]: https://github.com/twedl/microtrade/releases/tag/v0.1.3
 [0.1.2]: https://github.com/twedl/microtrade/releases/tag/v0.1.2

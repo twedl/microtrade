@@ -25,10 +25,15 @@ from microtrade.schema import (
 def _cols() -> tuple[Column, ...]:
     return (
         Column(
-            name="period", start=1, length=6, dtype="Utf8", nullable=False, parse="yyyymm_to_date"
+            physical_name="period",
+            start=1,
+            length=6,
+            dtype="Utf8",
+            nullable=False,
+            parse="yyyymm_to_date",
         ),
-        Column(name="hs_code", start=7, length=10, dtype="Utf8", nullable=False),
-        Column(name="value_usd", start=17, length=15, dtype="Int64", nullable=False),
+        Column(physical_name="hs_code", start=7, length=10, dtype="Utf8", nullable=False),
+        Column(physical_name="value_usd", start=17, length=15, dtype="Int64", nullable=False),
     )
 
 
@@ -50,8 +55,8 @@ def test_validate_spec_accepts_valid() -> None:
 
 def test_validate_spec_rejects_overlap() -> None:
     cols = (
-        Column(name="a", start=1, length=5, dtype="Utf8"),
-        Column(name="b", start=4, length=5, dtype="Utf8"),
+        Column(physical_name="a", start=1, length=5, dtype="Utf8"),
+        Column(physical_name="b", start=4, length=5, dtype="Utf8"),
     )
     with pytest.raises(SpecError, match="overlaps"):
         validate_spec(_spec(columns=cols, record_length=10))
@@ -59,15 +64,15 @@ def test_validate_spec_rejects_overlap() -> None:
 
 def test_validate_spec_rejects_duplicate_names() -> None:
     cols = (
-        Column(name="a", start=1, length=5, dtype="Utf8"),
-        Column(name="a", start=6, length=5, dtype="Utf8"),
+        Column(physical_name="a", start=1, length=5, dtype="Utf8"),
+        Column(physical_name="a", start=6, length=5, dtype="Utf8"),
     )
     with pytest.raises(SpecError, match="duplicate column"):
         validate_spec(_spec(columns=cols, record_length=10))
 
 
 def test_validate_spec_rejects_bad_dtype() -> None:
-    cols = (Column(name="a", start=1, length=5, dtype="Decimal"),)
+    cols = (Column(physical_name="a", start=1, length=5, dtype="Decimal"),)
     with pytest.raises(SpecError, match="non-canonical dtype"):
         validate_spec(_spec(columns=cols, record_length=5))
 
@@ -136,19 +141,24 @@ def test_diff_specs_detects_added_removed_changed() -> None:
     prev = _spec()
     new_cols = (
         Column(
-            name="period", start=1, length=6, dtype="Utf8", nullable=False, parse="yyyymm_to_date"
+            physical_name="period",
+            start=1,
+            length=6,
+            dtype="Utf8",
+            nullable=False,
+            parse="yyyymm_to_date",
         ),
-        Column(name="hs_code", start=7, length=10, dtype="Utf8", nullable=False),
+        Column(physical_name="hs_code", start=7, length=10, dtype="Utf8", nullable=False),
         Column(
-            name="value_usd", start=17, length=15, dtype="Float64", nullable=False
+            physical_name="value_usd", start=17, length=15, dtype="Float64", nullable=False
         ),  # dtype change
-        Column(name="qty_kg", start=32, length=10, dtype="Int64"),  # added
+        Column(physical_name="qty_kg", start=32, length=10, dtype="Int64"),  # added
     )
     curr = _spec(effective_from="2025-01", columns=new_cols, record_length=41)
     diff = diff_specs(prev, curr)
-    assert {c.name for c in diff.added} == {"qty_kg"}
+    assert {c.effective_name for c in diff.added} == {"qty_kg"}
     assert diff.removed == ()
-    assert {old.name for old, _ in diff.changed} == {"value_usd"}
+    assert {old.effective_name for old, _ in diff.changed} == {"value_usd"}
     assert not diff.is_empty
 
 
@@ -158,13 +168,13 @@ def test_diff_specs_empty_when_identical() -> None:
 
 def test_canonical_columns_unions_across_versions() -> None:
     cols_v1 = (
-        Column(name="a", start=1, length=5, dtype="Utf8", nullable=False),
-        Column(name="b", start=6, length=5, dtype="Int64", nullable=False),
+        Column(physical_name="a", start=1, length=5, dtype="Utf8", nullable=False),
+        Column(physical_name="b", start=6, length=5, dtype="Int64", nullable=False),
     )
     cols_v2 = (
-        Column(name="a", start=1, length=5, dtype="Utf8", nullable=True),  # widened
-        Column(name="b", start=6, length=5, dtype="Int64", nullable=False),
-        Column(name="c", start=11, length=5, dtype="Float64", nullable=True),  # added
+        Column(physical_name="a", start=1, length=5, dtype="Utf8", nullable=True),  # widened
+        Column(physical_name="b", start=6, length=5, dtype="Int64", nullable=False),
+        Column(physical_name="c", start=11, length=5, dtype="Float64", nullable=True),  # added
     )
     v1 = _spec(effective_from="2020-01", columns=cols_v1, record_length=10)
     v2 = _spec(effective_from="2024-01", columns=cols_v2, record_length=15)
@@ -177,8 +187,8 @@ def test_canonical_columns_unions_across_versions() -> None:
 
 
 def test_canonical_columns_rejects_dtype_conflict() -> None:
-    cols_v1 = (Column(name="a", start=1, length=5, dtype="Utf8"),)
-    cols_v2 = (Column(name="a", start=1, length=5, dtype="Int64"),)
+    cols_v1 = (Column(physical_name="a", start=1, length=5, dtype="Utf8"),)
+    cols_v2 = (Column(physical_name="a", start=1, length=5, dtype="Int64"),)
     v1 = _spec(effective_from="2020-01", columns=cols_v1, record_length=5)
     v2 = _spec(effective_from="2024-01", columns=cols_v2, record_length=5)
     with pytest.raises(SpecError, match="changes dtype"):

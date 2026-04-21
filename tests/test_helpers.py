@@ -71,9 +71,9 @@ def test_render_fwf_lines_honors_record_length_gaps() -> None:
         effective_from="2024-01",
         record_length=20,
         columns=(
-            Column(name="a", start=1, length=5, dtype="Utf8"),
+            Column(physical_name="a", start=1, length=5, dtype="Utf8"),
             # bytes 6-7 are a Blank-style filler gap
-            Column(name="b", start=8, length=5, dtype="Utf8"),
+            Column(physical_name="b", start=8, length=5, dtype="Utf8"),
             # bytes 13-20 are a trailing filler gap
         ),
     )

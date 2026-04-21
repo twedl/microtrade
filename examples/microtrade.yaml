@@ -1,0 +1,56 @@
+# Example project config for microtrade import-spec.
+#
+# Run from the repo root:
+#
+#     uv run microtrade import-spec examples/microdata-layout.xls \
+#         --config examples/microtrade.yaml \
+#         --out specs
+#
+# Two workbook entries are declared to show both the baseline (no renames)
+# and the `rename` feature. Only `microdata-layout.xls` ships in this repo;
+# the 2024 entry is illustrative so the companion config lines exist in
+# one place for reference when a real upstream workbook lands.
+
+workbooks:
+
+  # --- 2020 generation (baseline) ---
+  #
+  # Physical column names map 1:1 to logical names. No `rename` blocks
+  # are needed when upstream hasn't drifted.
+  microdata-layout.xls:
+    workbook_id: MICRODATA2020
+    effective_from: 2020-01
+    effective_to: 2023-12           # set when a successor workbook takes over
+    sheets:
+      SHEETNAME001:
+        trade_type: imports
+        filename_pattern: '^SHEETNAME001_(?P<year>\d{4})(?P<month>\d{2})(?P<flag>[NC])\.TXT\.zip$'
+      SHEETNAME002:
+        trade_type: exports_us
+        filename_pattern: '^SHEETNAME002_(?P<year>\d{4})(?P<month>\d{2})(?P<flag>[NC])\.TXT\.zip$'
+      SHEETNAME003:
+        trade_type: exports_nonus
+        filename_pattern: '^SHEETNAME003_(?P<year>\d{4})(?P<month>\d{2})(?P<flag>[NC])\.TXT\.zip$'
+
+  # --- 2024 generation (hypothetical; workbook not bundled) ---
+  #
+  # Upstream renamed the imports sheet's `hs10` column to `hs_code_10digit`.
+  # The `rename` block below carries the original logical name `hs10`
+  # forward so `canonical_columns` treats both workbook versions as one
+  # dense column in the combined dataset. The exports sheets didn't
+  # change between generations, so they have no rename - the baseline.
+  microdata-layout-2024.xls:
+    workbook_id: MICRODATA2024
+    effective_from: 2024-01
+    sheets:
+      SHEETNAME001:
+        trade_type: imports
+        filename_pattern: '^SHEETNAME001_(?P<year>\d{4})(?P<month>\d{2})(?P<flag>[NC])\.TXT\.zip$'
+        rename:
+          hs_code_10digit: hs10
+      SHEETNAME002:
+        trade_type: exports_us
+        filename_pattern: '^SHEETNAME002_(?P<year>\d{4})(?P<month>\d{2})(?P<flag>[NC])\.TXT\.zip$'
+      SHEETNAME003:
+        trade_type: exports_nonus
+        filename_pattern: '^SHEETNAME003_(?P<year>\d{4})(?P<month>\d{2})(?P<flag>[NC])\.TXT\.zip$'

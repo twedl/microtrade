@@ -33,9 +33,11 @@ workbooks:
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import yaml
@@ -59,6 +61,12 @@ class SheetConfig:
 
     filename_pattern: str
     trade_type: str | None = None  # None -> positional mapping
+    # Physical-to-logical column renames applied at import time. Each entry
+    # `physical: logical` stamps `logical_name=logical` on the Column whose
+    # Description cell (physical_name) is `physical`. Use this when upstream
+    # renames a column across workbook versions - the combined dataset sees
+    # one stable logical column even as the physical name drifts.
+    rename: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         validate_filename_pattern(self.filename_pattern, error_cls=ConfigError)
@@ -67,6 +75,14 @@ class SheetConfig:
                 f"sheets.<name>.trade_type {self.trade_type!r} is not a known trade type; "
                 f"allowed: {list(TRADE_TYPES)}"
             )
+        counts = Counter(self.rename.values())
+        dupes = sorted(name for name, n in counts.items() if n > 1)
+        if dupes:
+            raise ConfigError(
+                f"rename produces duplicate logical_name(s) {dupes}; each "
+                f"logical name may be used only once per sheet"
+            )
+        object.__setattr__(self, "rename", MappingProxyType(dict(self.rename)))
 
 
 @dataclass(frozen=True)
@@ -157,7 +173,15 @@ def _sheet_from_dict(workbook_name: str, sheet_name: str, data: dict[str, Any]) 
             f"workbook {workbook_name!r} sheet {sheet_name!r}: missing 'filename_pattern'"
         ) from exc
     trade_type = data.get("trade_type")
+    rename_raw = data.get("rename") or {}
+    if not isinstance(rename_raw, dict):
+        raise ConfigError(
+            f"workbook {workbook_name!r} sheet {sheet_name!r}: "
+            f"'rename' must be a physical -> logical mapping, got {type(rename_raw).__name__}"
+        )
+    rename = {str(k): str(v) for k, v in rename_raw.items()}
     return SheetConfig(
         filename_pattern=pattern,
         trade_type=str(trade_type) if trade_type is not None else None,
+        rename=rename,
     )

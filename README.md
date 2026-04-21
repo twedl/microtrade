@@ -62,6 +62,10 @@ workbooks:
       Imports:
         trade_type: imports
         filename_pattern: '^IMP_(?P<year>\d{4})(?P<month>\d{2})(?P<flag>[NC])\.TXT\.zip$'
+        # Upstream renamed `business_number` -> `business_number_9_digit`;
+        # keep the stable name in the combined dataset.
+        rename:
+          business_number_9_digit: business_number
       ExportsUS:
         trade_type: exports_us
         filename_pattern: '^EXUS_(?P<year>\d{4})(?P<month>\d{2})(?P<flag>[NC])\.TXT\.zip$'
@@ -73,6 +77,15 @@ workbooks:
 Required regex groups: `year` (4 digits) and `month` (2 digits). Optional:
 `flag` — when upstream publishes both `N` and `C` copies of the same period,
 `N` wins at discovery time.
+
+`rename` (optional, per sheet) maps a workbook's *physical* column name
+(the Description cell) to the *logical* name that shows up in the combined
+dataset. Each Spec stores both, ingest slices FWF bytes under
+`physical_name` and emits the parquet column under `logical_name` so
+consumers see one stable column even as upstream drifts.
+
+A worked example lives at [`examples/microtrade.yaml`](examples/microtrade.yaml),
+paired with `examples/microdata-layout.xls`.
 
 ### Import the schema workbook (once per schema version)
 
