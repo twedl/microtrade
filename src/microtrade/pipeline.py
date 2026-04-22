@@ -158,10 +158,17 @@ def run(config: PipelineConfig) -> RunSummary:
         unit="partition",
         disable=not config.show_progress,
     )
+    rows_total = 0
     for raw in progress:
-        progress.set_postfix_str(f"{raw.trade_type} {raw.period}", refresh=False)
+        progress.set_postfix_str(
+            f"{raw.trade_type} {raw.period} rows={rows_total:,}", refresh=False
+        )
         partition_results = _process_one(raw, config, specs_by_type, run_id=run_id)
         results.extend(partition_results)
+        rows_total += sum(r.rows_written for r in partition_results)
+        progress.set_postfix_str(
+            f"{raw.trade_type} {raw.period} rows={rows_total:,}", refresh=False
+        )
         trade_types_seen.add(raw.trade_type)
 
         manifest_path = manifest_paths.setdefault(
