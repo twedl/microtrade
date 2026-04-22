@@ -85,8 +85,9 @@ def ingest(
     max_quality_issues: int = typer.Option(
         pipeline.DEFAULT_MAX_QUALITY_ISSUES,
         "--max-quality-issues",
-        help="Cap on quality-issue JSONL records per partition (0 = unlimited). "
-        "Total skipped-row count is still tracked in the manifest even when the cap truncates.",
+        help="Abort the ingest if row-level quality issues exceed this cap "
+        "(0 = never abort). The JSONL log is also capped at this value so it "
+        "can't balloon past the cap.",
     ),
     max_skip_rate: float = typer.Option(
         pipeline.DEFAULT_MAX_SKIP_RATE,

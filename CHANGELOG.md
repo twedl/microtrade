@@ -6,6 +6,26 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-04-22
+
+### Changed
+
+- **Breaking:** `--max-quality-issues` now short-circuits the ingest when
+  the cap is exceeded instead of silently dropping further log entries
+  and continuing to parse. The JSONL log is still bounded by the cap
+  (writes stop at the boundary), but the partition is now marked
+  failed. Set `--max-quality-issues 0` to preserve the old "never
+  abort" behavior.
+
+### Fixed
+
+- `--max-skip-rate` now short-circuits as soon as the per-row skip
+  ratio crosses the threshold instead of parsing the whole file first.
+  A mostly-bad 23M-row file used to spend ~750s parsing end-to-end only
+  to fail at commit time; it now aborts within a few thousand rows.
+  Implementation: `iter_record_batches` takes a `max_skip_rate` kwarg
+  and checks every row-skip inside `_stream_lines`.
+
 ## [0.2.0] - 2026-04-22
 
 ### Changed

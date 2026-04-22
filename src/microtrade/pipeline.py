@@ -41,6 +41,7 @@ from microtrade.ingest import (
     QualityIssue,
     build_arrow_schema,
     iter_record_batches,
+    skip_rate_error,
 )
 from microtrade.schema import (
     ROUTING_COLUMN,
@@ -81,8 +82,10 @@ class PipelineConfig:
     chunk_rows: int = DEFAULT_CHUNK_ROWS
     compression: str = "zstd"
     encoding: str = "utf-8"
-    # Cap per-partition quality-issue JSONL records so a pathological file
-    # can't balloon the log to input-file size. 0 disables the cap.
+    # Abort the ingest (and delete its .tmp parquets) as soon as row-level
+    # quality issues exceed this cap. 0 disables the abort. The JSONL log is
+    # also bounded by this value since we stop before writing overflow
+    # entries.
     max_quality_issues: int = DEFAULT_MAX_QUALITY_ISSUES
     # Abort the partition (and delete its temp parquet) if the fraction of
     # rows that failed to parse exceeds this threshold. 1.0 disables the
@@ -246,11 +249,15 @@ def _process_one(
                     chunk_rows=config.chunk_rows,
                     encoding=config.encoding,
                     on_quality_issue=issue_sink,
+                    max_skip_rate=config.max_skip_rate,
                 ):
                     filtered = _route_rows(batch, raw, issue_sink)
                     if filtered.num_rows > 0:
                         w.write_batch(filtered)
-                _check_skip_rate(w.rows_written, issue_sink.count, config.max_skip_rate)
+                    # Per-batch check catches the route_rows rejection path
+                    # (out-of-window periods) that ingest's per-row check
+                    # doesn't see.
+                    _check_skip_rate(w.rows_written, issue_sink.count, config.max_skip_rate)
                 partition_rows = dict(w.partition_rows)
                 final_paths = dict(w.final_paths)
         except (IngestError, WriteError, OSError, ValueError) as exc:
@@ -356,12 +363,8 @@ def _check_skip_rate(rows_written: int, rows_skipped: int, threshold: float) -> 
     total = rows_written + rows_skipped
     if threshold >= 1.0 or total == 0:
         return
-    rate = rows_skipped / total
-    if rate > threshold:
-        raise IngestError(
-            f"{rows_skipped}/{total} rows failed parsing ({rate:.1%}); "
-            f"exceeds max_skip_rate {threshold:.1%}"
-        )
+    if rows_skipped / total > threshold:
+        raise skip_rate_error(rows_skipped, total, threshold)
 
 
 def _failure_result(
@@ -495,8 +498,13 @@ class _QualityIssueWriter:
 
     def __call__(self, issue: QualityIssue) -> None:
         self.count += 1
-        if self._limit > 0 and self.count_logged >= self._limit:
-            return
+        if self._limit > 0 and self.count > self._limit:
+            # The JSONL already has `limit` entries; abort instead of
+            # silently dropping further rows and parsing the rest of the file.
+            raise IngestError(
+                f"max_quality_issues cap of {self._limit} exceeded; {self.count} "
+                f"row-level issues encountered"
+            )
         if self._file is None:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             self._file = self._path.open("a", encoding="utf-8")

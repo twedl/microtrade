@@ -101,6 +101,7 @@ def iter_record_batches(
     chunk_rows: int = DEFAULT_CHUNK_ROWS,
     encoding: str = "utf-8",
     on_quality_issue: QualityIssueSink | None = None,
+    max_skip_rate: float = 1.0,
 ) -> Iterator[pa.RecordBatch]:
     """Yield pyarrow RecordBatches of up to `chunk_rows` rows streamed from `raw.path`.
 
@@ -110,6 +111,10 @@ def iter_record_batches(
     direct callers that want fail-fast). Structural errors (unknown dtype,
     wrong record length, multiple zip members, trade_type mismatch) always
     raise regardless.
+
+    `max_skip_rate` (<1.0) aborts the stream with `IngestError` as soon as
+    the per-row skip ratio exceeds the threshold, so a pathological file
+    doesn't get parsed end-to-end just to fail at commit time.
     """
     if chunk_rows <= 0:
         raise ValueError(f"chunk_rows must be positive, got {chunk_rows}")
@@ -139,6 +144,7 @@ def iter_record_batches(
                 chunk_rows,
                 encoding,
                 on_quality_issue,
+                max_skip_rate,
             )
 
 
@@ -151,6 +157,7 @@ def _stream_lines(
     chunk_rows: int,
     encoding: str,
     on_quality_issue: QualityIssueSink | None,
+    max_skip_rate: float,
 ) -> Iterator[pa.RecordBatch]:
     text = io.TextIOWrapper(binstream, encoding=encoding, newline="")
     # Precompute slices and per-column parser closures once per stream so the
@@ -184,6 +191,8 @@ def _stream_lines(
 
     buffers: list[list[object]] = [[] for _ in kept_indices]
     rows_in_batch = 0
+    # Per-row skip-rate check: abort as soon as ratio crosses threshold.
+    rows_skipped = 0
 
     for line_no, raw_line in enumerate(text, start=1):
         line = raw_line.rstrip("\n").rstrip("\r")
@@ -231,6 +240,9 @@ def _stream_lines(
                     raw_line=line,
                 )
             )
+            rows_skipped += 1
+            if max_skip_rate < 1.0 and rows_skipped / line_no > max_skip_rate:
+                raise skip_rate_error(rows_skipped, line_no, max_skip_rate)
             continue
 
         for buf, src in zip(buffers, kept_indices, strict=True):
@@ -368,3 +380,11 @@ def _build_batch(
 def _row_msg(raw: RawInput, line_no: int, column: str | None, detail: str) -> str:
     col_part = f" column {column!r}" if column is not None else ""
     return f"{raw.path.name} line {line_no}{col_part}: {detail}"
+
+
+def skip_rate_error(skipped: int, total: int, threshold: float) -> IngestError:
+    """Build the shared 'too many rows skipped' IngestError used by ingest and pipeline."""
+    return IngestError(
+        f"{skipped}/{total} rows failed parsing ({skipped / total:.1%}); "
+        f"exceeds max_skip_rate {threshold:.1%}"
+    )

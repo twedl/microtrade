@@ -289,30 +289,22 @@ def _make_bad_imports_zip(env: dict[str, Path], n_good: int, n_bad: int) -> Path
     return target
 
 
-def test_pipeline_quality_log_honors_cap(prepared_env) -> None:
-    """With `max_quality_issues=3`, only the first 3 bad rows land in the
-    JSONL file; `rows_skipped` in the manifest still reflects the full count."""
+def test_pipeline_max_quality_issues_aborts(prepared_env) -> None:
+    """Hitting `--max-quality-issues` short-circuits the ingest instead of
+    silently dropping the overflow. The JSONL log caps at `cap` entries and
+    the partition is marked failed."""
     env = prepared_env
     _make_bad_imports_zip(env, n_good=2, n_bad=10)
 
     summary = pipeline.run(_config(env, max_quality_issues=3, max_skip_rate=1.0))
-    partition = next(
-        r for r in summary.results if r.trade_type == "imports" and (r.year, r.month) == (2024, 1)
-    )
-    assert partition.status == "ok"
-    assert partition.rows_written == 2
-    assert partition.rows_skipped == 10
-    assert partition.rows_skipped_logged == 3
+    failed = next(r for r in summary.results if r.status == "failed")
+    assert failed.trade_type == "imports"
+    assert "max_quality_issues" in (failed.error or "")
 
     issues_file = env["output"] / "_quality_issues" / "imports" / f"{summary.run_id}.jsonl"
     records = [json.loads(line) for line in issues_file.read_text().strip().splitlines()]
+    # Log captured up to the cap; the overflow issue aborted instead of writing.
     assert len(records) == 3
-
-    manifest = next((env["output"] / "_manifests" / "imports").glob("*.jsonl")).read_text()
-    entries = [json.loads(line) for line in manifest.strip().splitlines()]
-    imports_jan = next(e for e in entries if (e["year"], e["month"]) == (2024, 1))
-    assert imports_jan["rows_skipped"] == 10
-    assert imports_jan["rows_skipped_logged"] == 3
 
 
 def test_pipeline_aborts_when_skip_rate_exceeded(prepared_env) -> None:
@@ -332,11 +324,13 @@ def test_pipeline_aborts_when_skip_rate_exceeded(prepared_env) -> None:
     if partition_dir.exists():
         assert list(partition_dir.iterdir()) == []
 
-    # Quality log still has the skipped rows for post-mortem.
+    # Quality log captures the rows seen before the short-circuit fired.
+    # Short-circuit semantics: the check aborts as soon as the skip ratio
+    # crosses the threshold, so we don't wait to log every subsequent bad row.
     issues_file = env["output"] / "_quality_issues" / "imports" / f"{summary.run_id}.jsonl"
     assert issues_file.exists()
     records = [json.loads(line) for line in issues_file.read_text().strip().splitlines()]
-    assert len(records) == 9
+    assert 0 < len(records) <= 9
 
 
 def test_pipeline_skip_rate_disabled_with_one_point_zero(prepared_env) -> None:
@@ -409,6 +403,23 @@ def test_pipeline_multi_month_snapshot_writes_all_partitions(tmp_path: Path) -> 
     for r in summary.results:
         assert r.snapshot_month == 3
         assert r.rows_written == 5
+
+
+def test_pipeline_skip_rate_aborts_mid_file(prepared_env) -> None:
+    """max-skip-rate should short-circuit once the ratio crosses the threshold;
+    the whole file shouldn't be parsed first. Assertion: rows_skipped_logged
+    is strictly less than the total bad-row count we wrote to the zip."""
+    env = prepared_env
+    n_bad = 100
+    _make_bad_imports_zip(env, n_good=1, n_bad=n_bad)
+
+    # chunk_rows=20 => 5+ batches; max_skip_rate=0.5 trips during batch 1.
+    summary = pipeline.run(_config(env, chunk_rows=20, max_skip_rate=0.5))
+    failed = next(r for r in summary.results if r.status == "failed")
+    assert failed.trade_type == "imports"
+    assert "max_skip_rate" in (failed.error or "")
+    # Short-circuit: we should have stopped well before logging all 100 bad rows.
+    assert failed.rows_skipped_logged < n_bad
 
 
 def test_pipeline_routes_out_of_range_rows_to_quality_log(tmp_path: Path) -> None:
