@@ -30,7 +30,7 @@ DATE_PARSERS: frozenset[str] = frozenset({"yyyymmdd_to_date", "yyyymm_to_date"})
 
 # Named operations for `Spec.computed_columns`. Each kind has a fixed
 # source-shape and output dtype (see ingest._compute_* dispatchers).
-COMPUTED_KINDS: frozenset[str] = frozenset({"concat_to_date"})
+COMPUTED_KINDS: frozenset[str] = frozenset({"concat_to_date", "concat_text"})
 
 # Named groups that a Spec's `source.filename_pattern` may expose. `year`/`month`
 # are required so discovery can route files to partitions; `flag` is optional and
@@ -79,6 +79,9 @@ class ComputedColumn:
     kind: str
     sources: tuple[str, ...]
     nullable: bool = True
+    # Used by `concat_text` to join source values; ignored by other kinds.
+    # Default is a single space.
+    separator: str = " "
 
 
 @dataclass(frozen=True)
@@ -396,13 +399,16 @@ def spec_to_dict(spec: Spec) -> dict[str, Any]:
 
 
 def _computed_column_to_dict(col: ComputedColumn) -> dict[str, Any]:
-    return {
+    out: dict[str, Any] = {
         "name": col.name,
         "dtype": col.dtype,
         "kind": col.kind,
         "sources": list(col.sources),
         "nullable": col.nullable,
     }
+    if col.kind == "concat_text" and col.separator != " ":
+        out["separator"] = col.separator
+    return out
 
 
 def _computed_column_from_dict(data: dict[str, Any]) -> ComputedColumn:
@@ -412,6 +418,7 @@ def _computed_column_from_dict(data: dict[str, Any]) -> ComputedColumn:
         kind=str(data["kind"]),
         sources=tuple(str(s) for s in data["sources"]),
         nullable=bool(data.get("nullable", True)),
+        separator=str(data.get("separator", " ")),
     )
 
 

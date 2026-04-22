@@ -503,6 +503,99 @@ def test_computed_invalid_day_goes_to_quality_log(tmp_path: Path) -> None:
     assert "day is out of range" in captured[0].error or "Feb" in captured[0].error
 
 
+def test_computed_concat_text_joins_trims_and_collapses(tmp_path: Path) -> None:
+    """concat_text joins Utf8 sources with a separator, skipping blanks/nulls
+    and collapsing internal runs of whitespace."""
+    import zipfile
+
+    import yaml as yaml_
+    from openpyxl import Workbook
+
+    from microtrade.discover import RawInput
+    from microtrade.ingest import iter_record_batches
+
+    # period (6) + first (10) + last (10) + period (redundant fixed trailing)
+    wb = Workbook()
+    wb.remove(wb.active)
+    ws = wb.create_sheet("ImportsSheet")
+    ws.append(["Position", "Description", "Length", "Type"])
+    ws.append([1, "period", 6, "Char"])
+    ws.append([7, "first", 10, "Char"])
+    ws.append([17, "last", 10, "Char"])
+    workbook_path = tmp_path / "wb.xlsx"
+    wb.save(workbook_path)
+
+    cfg = {
+        "workbooks": {
+            workbook_path.name: {
+                "effective_from": "2020-01",
+                "sheets": {
+                    "ImportsSheet": {
+                        "trade_type": "imports",
+                        "filename_pattern": default_filename_pattern("ImportsSheet"),
+                        "routing_column": "period",
+                        "cast": {"period": "Date"},
+                        "parse": {"period": "yyyymm_to_date"},
+                        "computed": {
+                            "full_name": {
+                                "kind": "concat_text",
+                                "sources": ["first", "last"],
+                            }
+                        },
+                    }
+                },
+            }
+        }
+    }
+    config_path = tmp_path / "microtrade.yaml"
+    config_path.write_text(yaml_.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    workbook_config = load_config(config_path).get_workbook(workbook_path)
+    imports = read_workbook(workbook_path, workbook_config)["imports"]
+
+    # Defaults: Utf8 output, single-space separator.
+    (comp,) = imports.computed_columns
+    assert comp.dtype == "Utf8" and comp.separator == " "
+
+    zip_path = tmp_path / "ImportsSheet_202406N.TXT.zip"
+    # row 0: both populated -> "Ada Lovelace"
+    # row 1: internal tab in first -> collapsed via \s+ -> "Grace Hopper"
+    # row 2: first blank, last present -> "Turing"
+    # row 3: both blank -> None
+    lines = [
+        "202406" + "Ada       " + "Lovelace  ",
+        "202406" + "Grace\t    " + "Hopper    ",
+        "202406" + "          " + "Turing    ",
+        "202406" + "          " + "          ",
+    ]
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("data.fwf", "\n".join(lines) + "\n")
+
+    raw = RawInput("imports", 2024, 6, zip_path)
+    (batch,) = list(iter_record_batches(raw, imports, chunk_rows=100, encoding="utf-8"))
+    assert batch.column("full_name").to_pylist() == [
+        "Ada Lovelace",
+        "Grace Hopper",
+        "Turing",
+        None,
+    ]
+
+
+def test_computed_concat_text_custom_separator_round_trips(tmp_path: Path) -> None:
+    """A non-default separator survives the YAML round-trip."""
+    from microtrade import schema as schema_mod
+    from microtrade.schema import ComputedColumn
+
+    comp = ComputedColumn(
+        name="joined",
+        dtype="Utf8",
+        kind="concat_text",
+        sources=("a", "b"),
+        separator=" - ",
+    )
+    loaded = schema_mod._computed_column_from_dict(schema_mod._computed_column_to_dict(comp))
+    assert loaded.separator == " - "
+
+
 def test_drop_removes_column_after_computed_uses_it(tmp_path: Path) -> None:
     """A source column dropped via `drop:` is still parsed so a computed column
     can reference it, but doesn't appear in the parquet output."""

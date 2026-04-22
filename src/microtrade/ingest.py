@@ -15,6 +15,7 @@ each parquet file would collide with `hive_partitioning=True` at read time.
 from __future__ import annotations
 
 import io
+import re
 import zipfile
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -34,6 +35,8 @@ _TO_PYARROW: dict[str, pa.DataType] = {
     "Float64": pa.float64(),
     "Date": pa.date32(),
 }
+
+_WHITESPACE_RE = re.compile(r"\s+")
 
 _DATE_FORMATS: dict[str, str] = {
     "yyyymmdd_to_date": "%Y%m%d",
@@ -377,6 +380,28 @@ def _make_computer(comp: ComputedColumn) -> Callable[[tuple[object, ...]], objec
                 ) from exc
 
         return concat
+
+    if comp.kind == "concat_text":
+        separator = comp.separator
+
+        def concat_text(values: tuple[object, ...]) -> object:
+            parts: list[str] = []
+            for v in values:
+                if v is None:
+                    continue
+                if not isinstance(v, str):
+                    raise _CastError(
+                        f"computed {comp.name!r}: concat_text source must be Utf8, "
+                        f"got {type(v).__name__}"
+                    )
+                stripped = v.strip()
+                if stripped:
+                    parts.append(stripped)
+            if not parts:
+                return None
+            return _WHITESPACE_RE.sub(" ", separator.join(parts)).strip()
+
+        return concat_text
 
     raise IngestError(f"computed column {comp.name!r}: unknown kind {comp.kind!r}")
 

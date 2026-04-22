@@ -125,6 +125,20 @@ operation:
   `Utf8` — `'02'` parses the same as `2`) into a full YYYYMMDD date.
   Row-level failures (e.g. Feb 30, unparseable day) go to the quality
   log like any other parse error.
+- `concat_text`: `sources: [col_a, col_b, ...]` → Utf8 column that
+  joins N Utf8 sources with `separator` (default `" "`), skipping
+  null or blank/whitespace-only sources and collapsing every run of
+  whitespace (including tabs/newlines) in the joined result to a
+  single space. A row with every source blank emits null. Override
+  the separator with `separator: "-"` (or any string).
+
+```yaml
+computed:
+  full_name:
+    kind: concat_text
+    sources: [first_name, last_name]
+    separator: " "          # optional; default is a single space
+```
 
 ```yaml
 computed:

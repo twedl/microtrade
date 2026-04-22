@@ -6,6 +6,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-04-22
+
+### Added
+
+- `concat_text` computed-column kind: joins N Utf8 sources with a
+  configurable `separator` (default single space), skipping null or
+  blank/whitespace-only sources and collapsing every run of whitespace
+  in the joined result to a single space. A row whose sources are all
+  blank emits null.
+
 ## [0.2.3] - 2026-04-22
 
 ### Changed

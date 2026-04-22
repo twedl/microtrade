@@ -285,9 +285,9 @@ def _computed_columns(
                 f"workbook {workbook_name!r} sheet {sheet_name!r}: computed column "
                 f"{name!r} 'sources' must be a list of column names"
             )
-        # Dtype defaults to the kind's canonical output (hardcoded here for now
-        # since we only have one kind; expand when more land).
-        default_dtype = "Date" if kind == "concat_to_date" else None
+        # Dtype defaults to the kind's canonical output.
+        kind_default_dtype = {"concat_to_date": "Date", "concat_text": "Utf8"}
+        default_dtype = kind_default_dtype.get(kind)
         dtype = (
             str(entry.get("dtype", default_dtype)) if entry.get("dtype") or default_dtype else ""
         )
@@ -297,6 +297,7 @@ def _computed_columns(
                 f"{name!r} has no dtype and kind {kind!r} has no default"
             )
         nullable = bool(entry.get("nullable", True))
+        separator = str(entry.get("separator", " "))
         out.append(
             ComputedColumn(
                 name=str(name),
@@ -304,6 +305,7 @@ def _computed_columns(
                 kind=kind,
                 sources=tuple(sources_raw),
                 nullable=nullable,
+                separator=separator,
             )
         )
     return tuple(out)
