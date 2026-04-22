@@ -6,6 +6,46 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-04-22
+
+### Changed
+
+- **Breaking (data model):** raw zips are now treated as YTD-cumulative
+  snapshots. A filename's month is a *snapshot marker* — the file
+  contains rows for every month from January through that month. Rows
+  route to destination partitions based on their in-row `period` column,
+  not the filename. Practical effects:
+  - Discovery keeps only the highest-month snapshot per `(trade_type,
+    year)`; earlier snapshots are strict subsets and skipped.
+  - A single input file now writes *multiple* per-month parquet
+    partitions (`MultiPartitionWriter`), one per `(year, month)` in the
+    rows.
+  - Rows whose `period` year doesn't match the snapshot's year, whose
+    period-month exceeds the snapshot-month, or whose `period` is null
+    route to the quality-issue log and are skipped.
+  - The manifest now writes one JSONL line per *output partition*
+    (not per input file). Each line records the source snapshot via
+    `snapshot_month` on `PartitionResult`.
+  - Flag priority inverted from `N > C > None` to `None > N > C`: an
+    unflagged file is treated as the authoritative base snapshot.
+- **Breaking (YAML):** `Spec.dropped_columns` can no longer include
+  `period`; the column is required to route rows.
+- **Breaking (API):** `_process_one` returns `list[PartitionResult]`
+  instead of a single result. `PartitionResult` gains `snapshot_month`.
+
+### Added
+
+- `write.MultiPartitionWriter` — context manager that lazily spawns one
+  `PartitionWriter` per `(year, month)` as rows arrive, atomic-renames
+  all children on success, deletes all `.tmp` files on exception.
+
+### Added (carried forward from Unreleased)
+
+- tqdm progress bar over the partition loop in `microtrade ingest`,
+  togglable with `--progress/--no-progress` (on by default). Programmatic
+  callers (`PipelineConfig.show_progress=False` by default) stay silent
+  so library usage and tests aren't affected.
+
 ## [0.1.7] - 2026-04-22
 
 ### Added
@@ -248,7 +288,8 @@ and CLI command stay `microtrade`.
   `inspect`) ship implemented; the package is fully typed (`py.typed`
   marker included in the wheel).
 
-[unreleased]: https://github.com/twedl/microtrade/compare/v0.1.7...HEAD
+[unreleased]: https://github.com/twedl/microtrade/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/twedl/microtrade/releases/tag/v0.2.0
 [0.1.7]: https://github.com/twedl/microtrade/releases/tag/v0.1.7
 [0.1.6]: https://github.com/twedl/microtrade/releases/tag/v0.1.6
 [0.1.5]: https://github.com/twedl/microtrade/releases/tag/v0.1.5

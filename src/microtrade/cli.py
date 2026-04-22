@@ -95,6 +95,11 @@ def ingest(
         max=1.0,
         help="Abort a partition if this fraction of rows fails to parse (1.0 = never abort).",
     ),
+    progress: bool = typer.Option(
+        True,
+        "--progress/--no-progress",
+        help="Show a tqdm progress bar over the partitions.",
+    ),
 ) -> None:
     """Process zipped FWF inputs into per-type Hive-partitioned Parquet datasets."""
     wanted_types = tuple(trade_types) if trade_types else schema.TRADE_TYPES
@@ -117,6 +122,7 @@ def ingest(
         encoding=encoding,
         max_quality_issues=max_quality_issues,
         max_skip_rate=max_skip_rate,
+        show_progress=progress,
     )
 
     summary = pipeline.run(config)

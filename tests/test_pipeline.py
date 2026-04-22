@@ -24,6 +24,7 @@ from tests._helpers import (
     input_filename,
     make_zip_input,
     render_fwf_lines,
+    render_ytd_fwf_lines,
 )
 
 SHEET_FOR_TRADE_TYPE: dict[str, str] = SHEET_TITLES
@@ -34,7 +35,12 @@ def _input_filename(trade_type: str, year: int, month: int, flag: str = "N") -> 
 
 
 def _workbook_config(tmp_path: Path, workbook: Path, effective_from: str, **kwargs):
-    """Build a microtrade.yaml next to `workbook` and return its WorkbookConfig."""
+    """Build a microtrade.yaml next to `workbook` and return its WorkbookConfig.
+
+    Pipeline tests always cast `period` to Date so the synthetic workbook's
+    Char-declared period column routes through MultiPartitionWriter.
+    """
+    kwargs.setdefault("cast_period_to_date", True)
     cfg_path = build_project_config(
         tmp_path / f"config_{effective_from}.yaml", workbook, effective_from, **kwargs
     )
@@ -59,12 +65,31 @@ def prepared_env(tmp_path: Path) -> dict[str, Path]:
     for trade_type, spec in specs_by_type.items():
         schema.save_spec(spec, spec_dir / trade_type / "v2020-01.yaml")
 
-    # Synthetic raw zips: 2024 (current YTD), 2023 (prior year, should be ignored).
+    # YTD snapshots: one per (trade_type, year). The 2024-02 snapshot covers
+    # Jan + Feb (rows_per_month rows each); the 2023-12 snapshot carries only
+    # December rows - enough to exercise the prior-year path without
+    # ballooning the fixture to 12 * rows_per_month rows.
     rows_per_month = {"imports": 12, "exports_us": 9, "exports_nonus": 6}
     for trade_type, spec in specs_by_type.items():
-        for year, month in [(2024, 1), (2024, 2), (2023, 12)]:
-            lines = render_fwf_lines(spec, n_rows=rows_per_month[trade_type], seed=month)
-            make_zip_input(input_dir / _input_filename(trade_type, year, month), lines)
+        # 2024 YTD through Feb (2 months of data).
+        lines = render_ytd_fwf_lines(
+            spec,
+            snapshot_year=2024,
+            snapshot_month=2,
+            rows_per_month=rows_per_month[trade_type],
+            seed=0,
+        )
+        make_zip_input(input_dir / _input_filename(trade_type, 2024, 2), lines)
+        # 2023 snapshot covers only December (start_month == snapshot_month).
+        lines = render_ytd_fwf_lines(
+            spec,
+            snapshot_year=2023,
+            snapshot_month=12,
+            start_month=12,
+            rows_per_month=rows_per_month[trade_type],
+            seed=1,
+        )
+        make_zip_input(input_dir / _input_filename(trade_type, 2023, 12), lines)
 
     return {
         "tmp": tmp_path,
@@ -184,7 +209,7 @@ def test_pipeline_records_failure_and_continues(prepared_env) -> None:
     # Corrupt one imports zip with a truncated (wrong-length) line - that's a
     # structural error that still fails the whole partition, unlike row-level
     # parse errors which are routed to the quality-issues log.
-    target = env["input"] / _input_filename("imports", 2024, 1)
+    target = env["input"] / _input_filename("imports", 2024, 2)
     target.unlink()
     workbook = env["tmp"] / "schema_workbook.xlsx"
     spec = excel_spec.read_workbook(workbook, _workbook_config(env["tmp"], workbook, "2020-01"))[
@@ -194,22 +219,22 @@ def test_pipeline_records_failure_and_continues(prepared_env) -> None:
     make_zip_input(target, [good[0], good[1][:-5]])
 
     summary = pipeline.run(_config(env))
-    # 6 total (3 types x 2 months); exactly 1 failed; others complete.
-    assert len(summary.results) == 6
+    # 2 trade types succeed with 2 partitions each (4 ok); imports fails as one
+    # snapshot-level failure, no partitions written.
     assert summary.failed_count == 1
+    assert summary.ok_count == 4
     failed = next(r for r in summary.results if r.status == "failed")
     assert failed.trade_type == "imports"
-    assert failed.year == 2024 and failed.month == 1
+    # Failure result carries the snapshot's (year, month).
+    assert failed.year == 2024 and failed.month == 2
     assert "truncated" in (failed.error or "")
 
-    # Failure is recorded in the manifest.
+    # Failure is recorded in the manifest under the snapshot (year, month).
     manifest = next((env["output"] / "_manifests" / "imports").glob("*.jsonl")).read_text(
         encoding="utf-8"
     )
     records = [json.loads(line) for line in manifest.strip().splitlines()]
-    statuses = {(r["year"], r["month"]): r["status"] for r in records}
-    assert statuses[(2024, 1)] == "failed"
-    assert statuses[(2024, 2)] == "ok"
+    assert [(r["year"], r["month"], r["status"]) for r in records] == [(2024, 2, "failed")]
 
 
 def test_pipeline_row_level_error_logged_to_quality_issues(prepared_env) -> None:
@@ -217,7 +242,7 @@ def test_pipeline_row_level_error_logged_to_quality_issues(prepared_env) -> None
     partition still writes successfully for the remaining rows."""
     env = prepared_env
 
-    target = env["input"] / _input_filename("imports", 2024, 1)
+    target = env["input"] / _input_filename("imports", 2024, 2)
     target.unlink()
     workbook = env["tmp"] / "schema_workbook.xlsx"
     spec = excel_spec.read_workbook(workbook, _workbook_config(env["tmp"], workbook, "2020-01"))[
@@ -249,7 +274,7 @@ def test_pipeline_row_level_error_logged_to_quality_issues(prepared_env) -> None
 def _make_bad_imports_zip(env: dict[str, Path], n_good: int, n_bad: int) -> Path:
     """Replace the 2024-01 imports zip with `n_good` valid rows and `n_bad`
     rows that have garbage bytes in the non-nullable `value_usd` column."""
-    target = env["input"] / _input_filename("imports", 2024, 1)
+    target = env["input"] / _input_filename("imports", 2024, 2)
     target.unlink()
     workbook = env["tmp"] / "schema_workbook.xlsx"
     spec = excel_spec.read_workbook(workbook, _workbook_config(env["tmp"], workbook, "2020-01"))[
@@ -299,7 +324,7 @@ def test_pipeline_aborts_when_skip_rate_exceeded(prepared_env) -> None:
     summary = pipeline.run(_config(env, max_skip_rate=0.5))
     failed = next(r for r in summary.results if r.status == "failed")
     assert failed.trade_type == "imports"
-    assert failed.year == 2024 and failed.month == 1
+    assert failed.year == 2024 and failed.month == 2
     assert "max_skip_rate" in (failed.error or "")
 
     # The aborted partition's temp parquet is not left behind.
@@ -327,6 +352,117 @@ def test_pipeline_skip_rate_disabled_with_one_point_zero(prepared_env) -> None:
     assert partition.status == "ok"
     assert partition.rows_written == 1
     assert partition.rows_skipped == 9
+
+
+def test_pipeline_ytd_dedups_snapshots_per_year(prepared_env) -> None:
+    """When both YYYY-01 and YYYY-02 snapshots exist for the same year, only the
+    latest (YYYY-02) is processed; the earlier snapshot is a strict subset."""
+    env = prepared_env
+    # Add an earlier snapshot for imports alongside the existing 2024-02.
+    workbook = env["tmp"] / "schema_workbook.xlsx"
+    wbcfg = _workbook_config(env["tmp"], workbook, "2020-01")
+    spec = excel_spec.read_workbook(workbook, wbcfg)["imports"]
+    obsolete = render_ytd_fwf_lines(
+        spec, snapshot_year=2024, snapshot_month=1, rows_per_month=3, seed=9
+    )
+    make_zip_input(env["input"] / _input_filename("imports", 2024, 1), obsolete)
+
+    summary = pipeline.run(_config(env))
+    imports_results = [r for r in summary.results if r.trade_type == "imports"]
+    # Each result references the 2024-02 snapshot, not 2024-01.
+    assert all(r.snapshot_month == 2 for r in imports_results)
+    assert {r.month for r in imports_results} == {1, 2}
+
+
+def test_pipeline_multi_month_snapshot_writes_all_partitions(tmp_path: Path) -> None:
+    """A single YTD file spanning 3 months writes 3 per-month parquet partitions
+    from one ingest, not three input files."""
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    spec_dir = tmp_path / "specs"
+    input_dir.mkdir()
+    workbook = build_workbook(tmp_path / "wb.xlsx")
+
+    wbcfg = _workbook_config(tmp_path, workbook, "2020-01")
+    spec = excel_spec.read_workbook(workbook, wbcfg)["imports"]
+    schema.save_spec(spec, spec_dir / "imports" / "v2020-01.yaml")
+
+    # Single snapshot file for 2024-03; rows span Jan/Feb/Mar.
+    lines = render_ytd_fwf_lines(
+        spec, snapshot_year=2024, snapshot_month=3, rows_per_month=5, seed=0
+    )
+    make_zip_input(input_dir / _input_filename("imports", 2024, 3), lines)
+
+    summary = pipeline.run(
+        pipeline.PipelineConfig(
+            input_dir=input_dir,
+            output_dir=output_dir,
+            spec_dir=spec_dir,
+            trade_types=("imports",),
+            ytd=False,
+            year=2024,
+        )
+    )
+    assert summary.ok_count == 3
+    months_written = {r.month for r in summary.results}
+    assert months_written == {1, 2, 3}
+    for r in summary.results:
+        assert r.snapshot_month == 3
+        assert r.rows_written == 5
+
+
+def test_pipeline_routes_out_of_range_rows_to_quality_log(tmp_path: Path) -> None:
+    """Rows whose in-row period is outside the snapshot window (wrong year or
+    month > snapshot_month) go to the quality log; they don't land in any
+    partition and don't fail the ingest."""
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    spec_dir = tmp_path / "specs"
+    input_dir.mkdir()
+    workbook = build_workbook(tmp_path / "wb.xlsx")
+
+    wbcfg = _workbook_config(tmp_path, workbook, "2020-01")
+    spec = excel_spec.read_workbook(workbook, wbcfg)["imports"]
+    schema.save_spec(spec, spec_dir / "imports" / "v2020-01.yaml")
+
+    # Good: period 202401 and 202402 (within snapshot). Bad: 202405 (month >
+    # snapshot_month=2) and 202301 (wrong year).
+    in_range = render_ytd_fwf_lines(
+        spec, snapshot_year=2024, snapshot_month=2, rows_per_month=2, seed=0
+    )
+    out_of_range = render_ytd_fwf_lines(
+        spec, snapshot_year=2024, snapshot_month=5, start_month=5, rows_per_month=2, seed=0
+    )
+    wrong_year = render_ytd_fwf_lines(
+        spec, snapshot_year=2023, snapshot_month=1, start_month=1, rows_per_month=2, seed=0
+    )
+    make_zip_input(
+        input_dir / _input_filename("imports", 2024, 2),
+        in_range + out_of_range + wrong_year,
+    )
+
+    summary = pipeline.run(
+        pipeline.PipelineConfig(
+            input_dir=input_dir,
+            output_dir=output_dir,
+            spec_dir=spec_dir,
+            trade_types=("imports",),
+            ytd=False,
+            year=2024,
+            max_skip_rate=1.0,  # don't abort on high skip rate
+        )
+    )
+    # 2 in-range partitions (Jan + Feb) land; 4 rows go to the quality log.
+    assert summary.ok_count == 2
+    assert sum(r.rows_written for r in summary.results) == 4
+    issues_files = list((output_dir / "_quality_issues" / "imports").glob("*.jsonl"))
+    issues = [
+        json.loads(line)
+        for f in issues_files
+        for line in f.read_text(encoding="utf-8").strip().splitlines()
+    ]
+    assert len(issues) == 4
+    assert all(i["column"] == "period" for i in issues)
 
 
 def test_pipeline_writes_canonical_dataset_schema(prepared_env) -> None:
@@ -436,4 +572,4 @@ def test_cli_ingest_exits_nonzero_on_failure(prepared_env) -> None:
         ],
     )
     assert result.exit_code == 1
-    assert "6 failed" in result.output
+    assert "3 failed" in result.output

@@ -540,7 +540,7 @@ def test_drop_removes_column_after_computed_uses_it(tmp_path: Path) -> None:
                                 "sources": ["period", "day"],
                             }
                         },
-                        "drop": ["day", "period"],
+                        "drop": ["day"],
                     }
                 },
             }
@@ -550,7 +550,7 @@ def test_drop_removes_column_after_computed_uses_it(tmp_path: Path) -> None:
     config_path.write_text(yaml_.safe_dump(cfg, sort_keys=False), encoding="utf-8")
     workbook_config = load_config(config_path).get_workbook(workbook_path)
     imports = read_workbook(workbook_path, workbook_config)["imports"]
-    assert imports.dropped_columns == ("day", "period")
+    assert imports.dropped_columns == ("day",)
 
     # End-to-end: the dropped columns don't appear in the output parquet, but
     # entry_date (which used them) does.
@@ -579,8 +579,9 @@ def test_drop_removes_column_after_computed_uses_it(tmp_path: Path) -> None:
     df = pl.scan_parquet(output_dir / "imports" / "**/*.parquet", hive_partitioning=True).collect()
     assert "entry_date" in df.columns
     assert "day" not in df.columns
-    assert "period" not in df.columns
-    assert df["entry_date"].to_list() == [date(2024, 1, 15), date(2024, 3, 15)]
+    # period stays — it's the routing key. `drop` refuses to remove it.
+    assert "period" in df.columns
+    assert sorted(df["entry_date"].to_list()) == [date(2024, 1, 15), date(2024, 3, 15)]
 
 
 def test_drop_rejects_unknown_column_name(schema_workbook: Path, tmp_path: Path) -> None:

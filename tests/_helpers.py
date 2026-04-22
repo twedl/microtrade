@@ -68,21 +68,26 @@ def build_project_config(
     effective_to: str | None = None,
     workbook_id: str | None = None,
     sheet_titles: dict[str, str] | None = None,
+    cast_period_to_date: bool = False,
 ) -> Path:
     """Write a `microtrade.yaml` referencing `workbook_path` with default patterns.
 
     Produces one entry per (trade_type, sheet_title) pair in `sheet_titles`
-    (defaulting to `SHEET_TITLES`). Each sheet gets the synthetic default
-    filename pattern and, if `trade_type` differs from its positional index,
-    an explicit `trade_type` override.
+    (defaulting to `SHEET_TITLES`). `cast_period_to_date=True` adds the
+    Date cast + yyyymm parse for the `period` column - required for any
+    pipeline test that feeds the synthetic workbook into MultiPartitionWriter.
     """
     titles = sheet_titles if sheet_titles is not None else SHEET_TITLES
-    sheets_cfg: dict[str, dict[str, str]] = {}
+    sheets_cfg: dict[str, object] = {}
     for trade_type, sheet_title in titles.items():
-        sheets_cfg[sheet_title] = {
+        entry: dict[str, object] = {
             "trade_type": trade_type,
             "filename_pattern": default_filename_pattern(sheet_title),
         }
+        if cast_period_to_date:
+            entry["cast"] = {"period": "Date"}
+            entry["parse"] = {"period": "yyyymm_to_date"}
+        sheets_cfg[sheet_title] = entry
     workbook_entry: dict[str, object] = {
         "effective_from": effective_from,
         "sheets": sheets_cfg,
@@ -227,6 +232,38 @@ def render_fwf_lines(
     lines = [_render_line(spec, ordered, rng, i) for i in range(n_rows)]
     if include_bad:
         lines.extend(_bad_rows(spec, rng, ordered))
+    return lines
+
+
+def render_ytd_fwf_lines(
+    spec: Spec,
+    *,
+    snapshot_year: int,
+    snapshot_month: int,
+    rows_per_month: int,
+    seed: int = 0,
+    start_month: int = 1,
+) -> list[str]:
+    """Generate YTD-cumulative FWF lines: `rows_per_month` rows for each month
+    from `snapshot_year`-`start_month` through `snapshot_year`-`snapshot_month`.
+
+    The `period` column (physical_name=="period", length 6) is pinned to the
+    `YYYYMM` of the row's month; the pipeline then routes each row to the
+    correct per-month partition via `MultiPartitionWriter`. `start_month`
+    lets a fixture skip earlier months (e.g. represent a dataset that only
+    has a December snapshot for a prior year).
+    """
+    rng = random.Random(seed)
+    ordered = list(spec.ordered_columns)
+    period_col = next((c for c in ordered if c.physical_name == "period"), None)
+    lines: list[str] = []
+    for month in range(start_month, snapshot_month + 1):
+        period_raw = f"{snapshot_year:04d}{month:02d}"
+        overrides: dict[str, str] | None = None
+        if period_col is not None:
+            overrides = {"period": period_raw.ljust(period_col.length)[: period_col.length]}
+        for i in range(rows_per_month):
+            lines.append(_render_line(spec, ordered, rng, i, overrides))
     return lines
 
 

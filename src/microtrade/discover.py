@@ -22,7 +22,10 @@ from pathlib import Path
 
 from microtrade.schema import TRADE_TYPES, Spec, load_all, validate_filename_pattern
 
-_FLAG_PRIORITY: Mapping[str, int] = {"N": 0, "C": 1}
+_FLAG_PRIORITY: Mapping[str, int] = {"N": 1, "C": 2}
+# None (unflagged) ranks 0 (most authoritative); N=1; C=2. When a
+# filename_pattern's `flag` group is optional, an unflagged file wins over
+# both N and C for the same (trade_type, year, month).
 
 
 class DiscoverError(ValueError):
@@ -173,8 +176,8 @@ def _dedup_by_flag(candidates: list[RawInput]) -> list[RawInput]:
 
 def _flag_rank(flag: str | None) -> int:
     if flag is None:
-        return len(_FLAG_PRIORITY)
-    return _FLAG_PRIORITY.get(flag, len(_FLAG_PRIORITY))
+        return 0
+    return _FLAG_PRIORITY.get(flag, len(_FLAG_PRIORITY) + 1)
 
 
 def ytd_filter(raw_inputs: Iterable[RawInput], *, current_year: int) -> list[RawInput]:

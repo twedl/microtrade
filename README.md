@@ -117,8 +117,7 @@ output. Runs after cast/rename/computed, so a dropped column can still
 feed a computed column and disappear afterward:
 
 ```yaml
-drop:
-  - day_of_month       # used by `entry_date`, then dropped from the output
+drop: [day_of_month]   # used by `entry_date`, then dropped from the output
 ```
 
 A worked example lives at [`examples/microtrade.yaml`](examples/microtrade.yaml),

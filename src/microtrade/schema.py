@@ -264,6 +264,11 @@ def _validate_dropped_columns(spec: Spec) -> None:
         )
     if available == set(spec.dropped_columns):
         raise SpecError("dropped_columns would leave the output schema empty")
+    if "period" in spec.dropped_columns:
+        raise SpecError(
+            "cannot drop the 'period' column; it is required to route rows to "
+            "per-(year, month) partitions"
+        )
 
 
 def _validate_computed_columns(spec: Spec) -> None:

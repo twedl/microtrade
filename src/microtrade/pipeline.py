@@ -29,6 +29,10 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, Literal, TextIO
 
+import pyarrow as pa
+import pyarrow.compute as pc
+from tqdm.auto import tqdm
+
 from microtrade import discover
 from microtrade.discover import RawInput
 from microtrade.ingest import (
@@ -49,7 +53,7 @@ from microtrade.schema import (
     now_iso,
     resolve,
 )
-from microtrade.write import PartitionWriter, WriteError
+from microtrade.write import MultiPartitionWriter, WriteError
 
 Status = Literal["ok", "failed"]
 STATUS_OK: Status = "ok"
@@ -83,6 +87,9 @@ class PipelineConfig:
     # rows that failed to parse exceeds this threshold. 1.0 disables the
     # abort - row-level failures just accumulate.
     max_skip_rate: float = DEFAULT_MAX_SKIP_RATE
+    # Show a tqdm progress bar over the partition loop. Disabled by default
+    # for programmatic callers (tests, library use); the CLI flips it on.
+    show_progress: bool = False
 
 
 @dataclass(frozen=True)
@@ -101,6 +108,11 @@ class PartitionResult:
     duration_seconds: float
     output_path: str
     status: Status
+    # The snapshot month captured from the source filename. Always equals
+    # `year` combined with `snapshot_month` for the file this partition
+    # came from. Routing: a single YTD snapshot (e.g. YYYY-06) writes
+    # multiple PartitionResults, one per destination month (Jan..Jun).
+    snapshot_month: int = 0
     error: str | None = None
 
 
@@ -139,15 +151,23 @@ def run(config: PipelineConfig) -> RunSummary:
     manifest_paths: dict[str, Path] = {}
     trade_types_seen: set[str] = set()
 
-    for raw in raw_inputs:
-        result = _process_one(raw, config, specs_by_type, run_id=run_id)
-        results.append(result)
+    progress = tqdm(
+        raw_inputs,
+        desc="ingesting",
+        unit="partition",
+        disable=not config.show_progress,
+    )
+    for raw in progress:
+        progress.set_postfix_str(f"{raw.trade_type} {raw.period}", refresh=False)
+        partition_results = _process_one(raw, config, specs_by_type, run_id=run_id)
+        results.extend(partition_results)
         trade_types_seen.add(raw.trade_type)
 
         manifest_path = manifest_paths.setdefault(
             raw.trade_type, _manifest_path(config.output_dir, raw.trade_type, run_id)
         )
-        _append_manifest(manifest_path, result, run_id=run_id, started_at=started_at)
+        for result in partition_results:
+            _append_manifest(manifest_path, result, run_id=run_id, started_at=started_at)
 
     # Refresh the canonical dataset schema for every trade type we touched
     # (or was configured), so consumers of `output/<type>/_dataset_schema.json`
@@ -181,7 +201,20 @@ def _select_inputs(config: PipelineConfig, specs_by_type: dict[str, list[Spec]])
             config.current_year if config.current_year is not None else datetime.now(tz=UTC).year
         )
         candidates = discover.ytd_filter(candidates, current_year=current_year)
-    return candidates
+    return _latest_snapshot_per_year(candidates)
+
+
+def _latest_snapshot_per_year(candidates: list[RawInput]) -> list[RawInput]:
+    """Files are YTD snapshots: a YYYY-12 file supersedes YYYY-11 and earlier
+    for the same year. Keep only the file with the highest `month` per
+    `(trade_type, year)`; the rest are strict subsets."""
+    latest: dict[tuple[str, int], RawInput] = {}
+    for raw in candidates:
+        key = (raw.trade_type, raw.year)
+        current = latest.get(key)
+        if current is None or raw.month > current.month:
+            latest[key] = raw
+    return sorted(latest.values(), key=lambda r: (r.trade_type, r.year, r.month))
 
 
 def _process_one(
@@ -190,21 +223,29 @@ def _process_one(
     specs_by_type: dict[str, list[Spec]],
     *,
     run_id: str,
-) -> PartitionResult:
+) -> list[PartitionResult]:
+    """Ingest one YTD snapshot file into per-month partitions.
+
+    Returns one `PartitionResult` per written `(year, month)` partition on
+    success, or a single failure result if the snapshot could not be
+    ingested. The snapshot's filename month appears as
+    `PartitionResult.snapshot_month` on every result so downstream
+    consumers can trace each partition back to its source.
+    """
     start = time.perf_counter()
     input_sha = _sha256_or_empty(raw.path)
 
     try:
         spec = _resolve_spec(raw, specs_by_type, config.spec_dir)
     except (SpecError, FileNotFoundError) as exc:
-        return _failure_result(raw, start, input_sha, spec_version=None, output_path="", error=exc)
+        return [
+            _failure_result(raw, start, input_sha, spec_version=None, output_path="", error=exc)
+        ]
 
     quality_path = _quality_issues_path(config.output_dir, raw.trade_type, run_id)
-    writer = PartitionWriter(
+    multi = MultiPartitionWriter(
         dataset_root=config.output_dir,
         trade_type=raw.trade_type,
-        year=raw.year,
-        month=raw.month,
         arrow_schema=build_arrow_schema(spec),
         compression=config.compression,
     )
@@ -212,7 +253,7 @@ def _process_one(
         path=quality_path, run_id=run_id, raw=raw, limit=config.max_quality_issues
     ) as issue_sink:
         try:
-            with writer as w:
+            with multi as w:
                 for batch in iter_record_batches(
                     raw,
                     spec,
@@ -220,35 +261,119 @@ def _process_one(
                     encoding=config.encoding,
                     on_quality_issue=issue_sink,
                 ):
-                    w.write_batch(batch)
-                rows_written = w.rows_written
-                _check_skip_rate(rows_written, issue_sink.count, config.max_skip_rate)
+                    filtered = _route_rows(batch, raw, issue_sink)
+                    if filtered.num_rows > 0:
+                        w.write_batch(filtered)
+                _check_skip_rate(w.rows_written, issue_sink.count, config.max_skip_rate)
+                partition_rows = dict(w.partition_rows)
+                final_paths = dict(w.final_paths)
         except (IngestError, WriteError, OSError, ValueError) as exc:
-            return _failure_result(
-                raw,
-                start,
-                input_sha,
-                spec_version=spec.version,
-                output_path=str(writer.final_path),
-                error=exc,
-                rows_skipped=issue_sink.count,
-                rows_skipped_logged=issue_sink.count_logged,
-            )
+            return [
+                _failure_result(
+                    raw,
+                    start,
+                    input_sha,
+                    spec_version=spec.version,
+                    output_path="",
+                    error=exc,
+                    rows_skipped=issue_sink.count,
+                    rows_skipped_logged=issue_sink.count_logged,
+                )
+            ]
 
-        return PartitionResult(
-            trade_type=raw.trade_type,
-            year=raw.year,
-            month=raw.month,
-            input_path=str(raw.path),
-            input_sha256=input_sha,
-            spec_version=spec.version,
-            rows_written=rows_written,
-            rows_skipped=issue_sink.count,
-            rows_skipped_logged=issue_sink.count_logged,
-            duration_seconds=time.perf_counter() - start,
-            output_path=str(writer.final_path),
-            status=STATUS_OK,
-        )
+        duration = time.perf_counter() - start
+        rows_skipped = issue_sink.count
+        rows_skipped_logged = issue_sink.count_logged
+        if not partition_rows:
+            return [
+                PartitionResult(
+                    trade_type=raw.trade_type,
+                    year=raw.year,
+                    month=raw.month,
+                    input_path=str(raw.path),
+                    input_sha256=input_sha,
+                    spec_version=spec.version,
+                    rows_written=0,
+                    rows_skipped=rows_skipped,
+                    rows_skipped_logged=rows_skipped_logged,
+                    duration_seconds=duration,
+                    output_path="",
+                    status=STATUS_OK,
+                    snapshot_month=raw.month,
+                )
+            ]
+
+        return [
+            PartitionResult(
+                trade_type=raw.trade_type,
+                year=year,
+                month=month,
+                input_path=str(raw.path),
+                input_sha256=input_sha,
+                spec_version=spec.version,
+                rows_written=rows,
+                # Row-level skipped counts are tracked at the file level; we
+                # attribute the whole count to each partition line so a
+                # consumer summing the manifest never undercounts. Duration
+                # is similarly per-file.
+                rows_skipped=rows_skipped,
+                rows_skipped_logged=rows_skipped_logged,
+                duration_seconds=duration,
+                output_path=str(final_paths[(year, month)]),
+                status=STATUS_OK,
+                snapshot_month=raw.month,
+            )
+            for (year, month), rows in sorted(partition_rows.items())
+        ]
+
+
+def _route_rows(
+    batch: pa.RecordBatch, raw: RawInput, issue_sink: _QualityIssueWriter
+) -> pa.RecordBatch:
+    """Filter out rows whose `period` doesn't fit the snapshot's year window.
+
+    A YTD snapshot for (year, snapshot_month) claims rows in that year with
+    period-month <= snapshot_month. Rows outside that range or with null
+    period go to the quality log and are excluded from the batch.
+    """
+    period = batch.column("period")
+    null_mask = pc.is_null(period).to_pylist()
+    years = pc.year(period).to_pylist()
+    months = pc.month(period).to_pylist()
+
+    keep: list[bool] = []
+    for i in range(batch.num_rows):
+        if null_mask[i]:
+            issue_sink(
+                QualityIssue(
+                    file=raw.path.name,
+                    line_no=i + 1,
+                    column="period",
+                    error="period is null; row cannot be routed to a partition",
+                    raw_line="",
+                )
+            )
+            keep.append(False)
+            continue
+        row_year = int(years[i])
+        row_month = int(months[i])
+        if row_year != raw.year or row_month > raw.month:
+            issue_sink(
+                QualityIssue(
+                    file=raw.path.name,
+                    line_no=i + 1,
+                    column="period",
+                    error=(
+                        f"row period {row_year}-{row_month:02d} is outside the "
+                        f"snapshot window ({raw.year}-01..{raw.year}-{raw.month:02d})"
+                    ),
+                    raw_line="",
+                )
+            )
+            keep.append(False)
+            continue
+        keep.append(True)
+    return batch.filter(pa.array(keep))
 
 
 def _check_skip_rate(rows_written: int, rows_skipped: int, threshold: float) -> None:
