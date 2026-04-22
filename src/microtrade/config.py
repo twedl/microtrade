@@ -70,6 +70,11 @@ class SheetConfig:
     # to be literally named "period" - set this to whatever the sheet
     # actually calls it (e.g. "year_month"). The referenced column must
     # end up Date-typed in the spec (via workbook dtype or `cast` here).
+    #
+    # Matched against the *logical* (post-rename) column name. If you
+    # rename `foo_physical` -> `bar_logical`, set `routing_column:
+    # bar_logical`. Columns with no rename match on their physical name
+    # since `effective_name` falls back to that.
     routing_column: str = "period"
     trade_type: str | None = None  # None -> positional mapping
     # Physical-to-logical column renames applied at import time. Each entry

@@ -351,16 +351,29 @@ def _make_computer(comp: ComputedColumn) -> Callable[[tuple[object, ...]], objec
                 raise _CastError(
                     f"computed {comp.name!r}: first source must be Date, got {type(base).__name__}"
                 )
-            if not isinstance(day, int):
+            if isinstance(day, str):
+                stripped = day.strip()
+                if not stripped:
+                    return None
+                try:
+                    day_int = int(stripped)
+                except ValueError as exc:
+                    raise _CastError(
+                        f"computed {comp.name!r}: cannot parse day source {day!r} as int"
+                    ) from exc
+            elif isinstance(day, int):
+                day_int = day
+            else:
                 raise _CastError(
-                    f"computed {comp.name!r}: second source must be Int64, got {type(day).__name__}"
+                    f"computed {comp.name!r}: second source must be Int64 or Utf8, "
+                    f"got {type(day).__name__}"
                 )
             try:
-                return date(base.year, base.month, day)
+                return date(base.year, base.month, day_int)
             except ValueError as exc:
                 raise _CastError(
                     f"computed {comp.name!r}: cannot build date({base.year}, "
-                    f"{base.month}, {day}): {exc}"
+                    f"{base.month}, {day_int}): {exc}"
                 ) from exc
 
         return concat

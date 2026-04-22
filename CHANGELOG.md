@@ -6,6 +6,17 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-04-22
+
+### Changed
+
+- `concat_to_date` now accepts a `Utf8` day source as well as `Int64`.
+  A string like `'02'` is stripped and parsed to an int before being
+  combined with the YYYYMM Date source; blank strings yield a null row
+  and unparseable strings go to the quality log. Previously the day
+  source had to be `Int64`, forcing an otherwise-unnecessary `cast` on
+  specs whose upstream declares the day field as `Char`.
+
 ## [0.2.2] - 2026-04-22
 
 ### Changed

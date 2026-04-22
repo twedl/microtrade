@@ -94,6 +94,10 @@ it. Upstream schemas name this column differently (`period`, `year_month`,
 `ref_month`, …) so the field is per-sheet rather than a hardcoded
 convention.
 
+Match the value against the *logical* (post-rename) column name. If you
+rename `foo_physical → bar_logical`, set `routing_column: bar_logical`.
+Columns with no rename match on their physical name.
+
 `rename` (optional, per sheet) maps a workbook's *physical* column name
 (the Description cell) to the *logical* name that shows up in the combined
 dataset. Each Spec stores both, ingest slices FWF bytes under
@@ -116,10 +120,11 @@ columns at ingest time. Keyed by the output column's name; values
 declare a named operation (`kind`) and its `sources`. First available
 operation:
 
-- `concat_to_date`: `sources: [period_date_col, day_int_col]` → Date
-  column combining a YYYYMM `Date` and a day-of-month `Int64` into a
-  full YYYYMMDD date. Row-level failures (e.g. Feb 30) go to the
-  quality log like any other parse error.
+- `concat_to_date`: `sources: [period_date_col, day_col]` → Date
+  column combining a YYYYMM `Date` and a day-of-month (`Int64` or
+  `Utf8` — `'02'` parses the same as `2`) into a full YYYYMMDD date.
+  Row-level failures (e.g. Feb 30, unparseable day) go to the quality
+  log like any other parse error.
 
 ```yaml
 computed:
