@@ -44,8 +44,10 @@ import yaml
 
 from microtrade.schema import (
     CANONICAL_DTYPES,
+    COMPUTED_KINDS,
     DATE_PARSERS,
     TRADE_TYPES,
+    ComputedColumn,
     validate_filename_pattern,
     validate_period_window,
 )
@@ -78,6 +80,15 @@ class SheetConfig:
     # `yyyymm_to_date` instead of the Date default `yyyymmdd_to_date`).
     # Keys are physical_name, values must be in DATE_PARSERS.
     parse: Mapping[str, str] = field(default_factory=dict)
+    # Columns computed from other columns at ingest time (e.g. concat a
+    # YYYYMM Date column and a DD Int column into a YYYYMMDD Date). Keyed
+    # by output column name; values describe the operation.
+    computed: tuple[ComputedColumn, ...] = ()
+    # Column names to omit from the final parquet output. Applied after
+    # renames/casts/computed, so a dropped column can still feed a
+    # `computed` entry before disappearing. Names match `effective_name`
+    # for FWF columns, `name` for computed columns.
+    drop: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         validate_filename_pattern(self.filename_pattern, error_cls=ConfigError)
@@ -104,6 +115,20 @@ class SheetConfig:
             raise ConfigError(
                 f"parse values {bad_parse} are unknown; allowed: {sorted(DATE_PARSERS)}"
             )
+        bad_kinds = sorted({c.kind for c in self.computed if c.kind not in COMPUTED_KINDS})
+        if bad_kinds:
+            raise ConfigError(
+                f"computed kinds {bad_kinds} are unknown; allowed: {sorted(COMPUTED_KINDS)}"
+            )
+        comp_counts = Counter(c.name for c in self.computed)
+        dup_computed = sorted(name for name, n in comp_counts.items() if n > 1)
+        if dup_computed:
+            raise ConfigError(
+                f"computed column name(s) {dup_computed} appear more than once per sheet"
+            )
+        drop_dupes = sorted({n for n, c in Counter(self.drop).items() if c > 1})
+        if drop_dupes:
+            raise ConfigError(f"drop lists duplicate name(s): {drop_dupes}")
         object.__setattr__(self, "rename", MappingProxyType(dict(self.rename)))
         object.__setattr__(self, "cast", MappingProxyType(dict(self.cast)))
         object.__setattr__(self, "parse", MappingProxyType(dict(self.parse)))
@@ -200,13 +225,74 @@ def _sheet_from_dict(workbook_name: str, sheet_name: str, data: dict[str, Any]) 
     rename = _str_mapping(data, "rename", workbook_name=workbook_name, sheet_name=sheet_name)
     cast = _str_mapping(data, "cast", workbook_name=workbook_name, sheet_name=sheet_name)
     parse = _str_mapping(data, "parse", workbook_name=workbook_name, sheet_name=sheet_name)
+    computed = _computed_columns(data, workbook_name=workbook_name, sheet_name=sheet_name)
+    drop_raw = data.get("drop") or []
+    if not isinstance(drop_raw, list) or not all(isinstance(s, str) for s in drop_raw):
+        raise ConfigError(
+            f"workbook {workbook_name!r} sheet {sheet_name!r}: 'drop' must be a list of strings"
+        )
     return SheetConfig(
         filename_pattern=pattern,
         trade_type=str(trade_type) if trade_type is not None else None,
         rename=rename,
         cast=cast,
         parse=parse,
+        computed=computed,
+        drop=tuple(drop_raw),
     )
+
+
+def _computed_columns(
+    data: dict[str, Any], *, workbook_name: str, sheet_name: str
+) -> tuple[ComputedColumn, ...]:
+    raw = data.get("computed") or {}
+    if not isinstance(raw, dict):
+        raise ConfigError(
+            f"workbook {workbook_name!r} sheet {sheet_name!r}: 'computed' must be a mapping, "
+            f"got {type(raw).__name__}"
+        )
+    out: list[ComputedColumn] = []
+    for name, entry in raw.items():
+        if not isinstance(entry, dict):
+            raise ConfigError(
+                f"workbook {workbook_name!r} sheet {sheet_name!r}: computed column "
+                f"{name!r} must be a mapping with kind/sources/dtype keys"
+            )
+        try:
+            kind = str(entry["kind"])
+            sources_raw = entry["sources"]
+        except KeyError as exc:
+            raise ConfigError(
+                f"workbook {workbook_name!r} sheet {sheet_name!r}: computed column "
+                f"{name!r} missing required key {exc.args[0]!r}"
+            ) from exc
+        if not isinstance(sources_raw, list) or not all(isinstance(s, str) for s in sources_raw):
+            raise ConfigError(
+                f"workbook {workbook_name!r} sheet {sheet_name!r}: computed column "
+                f"{name!r} 'sources' must be a list of column names"
+            )
+        # Dtype defaults to the kind's canonical output (hardcoded here for now
+        # since we only have one kind; expand when more land).
+        default_dtype = "Date" if kind == "concat_to_date" else None
+        dtype = (
+            str(entry.get("dtype", default_dtype)) if entry.get("dtype") or default_dtype else ""
+        )
+        if not dtype:
+            raise ConfigError(
+                f"workbook {workbook_name!r} sheet {sheet_name!r}: computed column "
+                f"{name!r} has no dtype and kind {kind!r} has no default"
+            )
+        nullable = bool(entry.get("nullable", True))
+        out.append(
+            ComputedColumn(
+                name=str(name),
+                dtype=dtype,
+                kind=kind,
+                sources=tuple(sources_raw),
+                nullable=nullable,
+            )
+        )
+    return tuple(out)
 
 
 def _str_mapping(

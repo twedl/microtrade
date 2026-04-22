@@ -18,13 +18,13 @@ import io
 import zipfile
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import IO
 
 import pyarrow as pa
 
 from microtrade.discover import RawInput
-from microtrade.schema import Column, Spec
+from microtrade.schema import Column, ComputedColumn, Spec
 
 DEFAULT_CHUNK_ROWS: int = 250_000
 
@@ -67,16 +67,30 @@ def build_arrow_schema(spec: Spec) -> pa.Schema:
     """Return the pyarrow schema that RecordBatches from this spec will use.
 
     Partition columns (`year`, `month`) are intentionally not included - they
-    live in the Hive directory path only.
+    live in the Hive directory path only. Computed columns follow the FWF
+    columns, in declaration order. Columns listed in `spec.dropped_columns`
+    are omitted here but still sliced from the FWF in `_stream_lines`, so
+    they can feed a computed column before disappearing.
     """
+    dropped = set(spec.dropped_columns)
     fields: list[pa.Field] = []
     for col in spec.ordered_columns:
         if col.dtype not in _TO_PYARROW:
             raise IngestError(
                 f"column {col.physical_name!r} has dtype {col.dtype!r} with no pyarrow mapping"
             )
+        if col.effective_name in dropped:
+            continue
         # Parquet field uses the logical name so merged datasets stay stable.
         fields.append(pa.field(col.effective_name, _TO_PYARROW[col.dtype], nullable=col.nullable))
+    for comp in spec.computed_columns:
+        if comp.dtype not in _TO_PYARROW:
+            raise IngestError(
+                f"computed column {comp.name!r} has dtype {comp.dtype!r} with no pyarrow mapping"
+            )
+        if comp.name in dropped:
+            continue
+        fields.append(pa.field(comp.name, _TO_PYARROW[comp.dtype], nullable=comp.nullable))
     return pa.schema(fields)
 
 
@@ -145,14 +159,30 @@ def _stream_lines(
     slices = [slice(c.start - 1, c.start - 1 + c.length) for c in columns_ordered]
     parsers = [_make_parser(c) for c in columns_ordered]
     col_names = [c.effective_name for c in columns_ordered]
-    field_types = [arrow_schema.field(i).type for i in range(n)]
+
+    # Computed columns: each runs after FWF parsing, indexing into the current
+    # row's parsed values by source column position. Resolve source names to
+    # indices once per stream.
+    fwf_index = {name: i for i, name in enumerate(col_names)}
+    computed_specs = [
+        (comp, tuple(fwf_index[src] for src in comp.sources), _make_computer(comp))
+        for comp in spec.computed_columns
+    ]
+    n_total = n + len(computed_specs)
+
+    # Dropped columns are still parsed (computed may depend on them) but never
+    # land in a buffer. `kept_indices` picks the row_values slots that survive.
+    dropped = set(spec.dropped_columns)
+    all_output_names = col_names + [c.name for c in spec.computed_columns]
+    kept_indices = tuple(i for i, name in enumerate(all_output_names) if name not in dropped)
+    field_types = [arrow_schema.field(j).type for j in range(len(kept_indices))]
 
     # Per-line comparisons resolve against locals; `record_length` is an upper
     # bound and `min_required` is the last real-column byte.
     min_required = spec.min_record_length
     max_allowed = spec.record_length
 
-    buffers: list[list[object]] = [[] for _ in range(n)]
+    buffers: list[list[object]] = [[] for _ in kept_indices]
     rows_in_batch = 0
 
     for line_no, raw_line in enumerate(text, start=1):
@@ -169,7 +199,7 @@ def _stream_lines(
                 f"record_length {max_allowed} (got {line_len})"
             )
 
-        row_values: list[object] = [None] * n
+        row_values: list[object] = [None] * n_total
         bad_column: str | None = None
         bad_error: _CastError | None = None
         for i in range(n):
@@ -179,6 +209,15 @@ def _stream_lines(
                 bad_column = col_names[i]
                 bad_error = exc
                 break
+
+        if bad_error is None:
+            for offset, (comp, src_indices, computer) in enumerate(computed_specs):
+                try:
+                    row_values[n + offset] = computer(tuple(row_values[s] for s in src_indices))
+                except _CastError as exc:
+                    bad_column = comp.name
+                    bad_error = exc
+                    break
 
         if bad_error is not None:
             if on_quality_issue is None:
@@ -194,13 +233,13 @@ def _stream_lines(
             )
             continue
 
-        for buf, val in zip(buffers, row_values, strict=True):
-            buf.append(val)
+        for buf, src in zip(buffers, kept_indices, strict=True):
+            buf.append(row_values[src])
         rows_in_batch += 1
 
         if rows_in_batch >= chunk_rows:
             yield _build_batch(buffers, arrow_schema, field_types)
-            buffers = [[] for _ in range(n)]
+            buffers = [[] for _ in kept_indices]
             rows_in_batch = 0
 
     if rows_in_batch > 0:
@@ -281,6 +320,40 @@ def _make_parser(col: Column) -> Callable[[str], object]:
         return parse_date
 
     raise IngestError(f"column {col.physical_name!r}: unsupported dtype {col.dtype!r}")
+
+
+def _make_computer(comp: ComputedColumn) -> Callable[[tuple[object, ...]], object]:
+    """Return a closure that computes one row's value from its source values.
+
+    Raises `IngestError` up front if the `kind` is unknown; per-row parse-
+    style failures raise `_CastError` which the stream loop routes to the
+    quality log.
+    """
+    if comp.kind == "concat_to_date":
+
+        def concat(values: tuple[object, ...]) -> object:
+            base, day = values
+            if base is None or day is None:
+                return None
+            if not isinstance(base, date):
+                raise _CastError(
+                    f"computed {comp.name!r}: first source must be Date, got {type(base).__name__}"
+                )
+            if not isinstance(day, int):
+                raise _CastError(
+                    f"computed {comp.name!r}: second source must be Int64, got {type(day).__name__}"
+                )
+            try:
+                return date(base.year, base.month, day)
+            except ValueError as exc:
+                raise _CastError(
+                    f"computed {comp.name!r}: cannot build date({base.year}, "
+                    f"{base.month}, {day}): {exc}"
+                ) from exc
+
+        return concat
+
+    raise IngestError(f"computed column {comp.name!r}: unknown kind {comp.kind!r}")
 
 
 def _build_batch(

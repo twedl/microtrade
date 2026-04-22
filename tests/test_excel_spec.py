@@ -344,6 +344,298 @@ def test_read_workbook_rejects_cast_for_unknown_column(
         read_workbook(schema_workbook, workbook_config)
 
 
+def test_computed_concat_to_date_end_to_end(tmp_path: Path) -> None:
+    """A `computed: {entry_date: {kind: concat_to_date, sources: [period, day]}}`
+    in the config materializes a Date column at ingest from a YYYYMM period
+    and a DD integer."""
+    import zipfile
+    from datetime import date
+
+    import polars as pl
+    import yaml as yaml_
+    from openpyxl import Workbook
+
+    from microtrade import pipeline
+    from microtrade.discover import RawInput
+    from microtrade.ingest import iter_record_batches
+
+    # Workbook: period (6 chars, YYYYMM) + day (2 chars) + value (3 chars).
+    wb = Workbook()
+    wb.remove(wb.active)
+    ws = wb.create_sheet("ImportsSheet")
+    ws.append(["Position", "Description", "Length", "Type"])
+    ws.append([1, "period", 6, "Char"])
+    ws.append([7, "day", 2, "Char"])
+    ws.append([9, "value", 3, "Char"])
+    workbook_path = tmp_path / "wb.xlsx"
+    wb.save(workbook_path)
+
+    cfg = {
+        "workbooks": {
+            workbook_path.name: {
+                "effective_from": "2020-01",
+                "sheets": {
+                    "ImportsSheet": {
+                        "trade_type": "imports",
+                        "filename_pattern": default_filename_pattern("ImportsSheet"),
+                        "cast": {"period": "Date", "day": "Int64"},
+                        "parse": {"period": "yyyymm_to_date"},
+                        "computed": {
+                            "entry_date": {
+                                "kind": "concat_to_date",
+                                "sources": ["period", "day"],
+                            }
+                        },
+                    }
+                },
+            }
+        }
+    }
+    config_path = tmp_path / "microtrade.yaml"
+    config_path.write_text(yaml_.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    workbook_config = load_config(config_path).get_workbook(workbook_path)
+    imports = read_workbook(workbook_path, workbook_config)["imports"]
+
+    # Spec carries computed_columns and validate_spec passed.
+    assert len(imports.computed_columns) == 1
+    comp = imports.computed_columns[0]
+    assert comp.name == "entry_date" and comp.dtype == "Date"
+    assert comp.sources == ("period", "day")
+
+    # Synthesize FWF data and ingest end-to-end.
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    zip_path = input_dir / "ImportsSheet_202406N.TXT.zip"
+    # period=YYYYMM(6) day=DD(2) value=(3) -> record_length 11
+    lines = ["20240115AAA", "20240315BBB"]
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("data.fwf", "\n".join(lines) + "\n")
+
+    raw = RawInput("imports", 2024, 6, zip_path)
+    (batch,) = list(iter_record_batches(raw, imports, chunk_rows=100, encoding="utf-8"))
+    assert batch.column("entry_date").to_pylist() == [date(2024, 1, 15), date(2024, 3, 15)]
+    assert batch.column("period").to_pylist() == [date(2024, 1, 1), date(2024, 3, 1)]
+
+    # Full pipeline run produces a parquet with the computed column.
+    spec_dir = tmp_path / "specs"
+    schema.save_spec(imports, spec_dir / "imports" / "v2020-01.yaml")
+    output_dir = tmp_path / "output"
+    summary = pipeline.run(
+        pipeline.PipelineConfig(
+            input_dir=input_dir,
+            output_dir=output_dir,
+            spec_dir=spec_dir,
+            trade_types=("imports",),
+            ytd=False,
+            year=2024,
+            month=6,
+            encoding="utf-8",
+        )
+    )
+    assert summary.failed_count == 0
+    df = pl.scan_parquet(output_dir / "imports" / "**/*.parquet", hive_partitioning=True).collect()
+    assert "entry_date" in df.columns
+    assert df["entry_date"].to_list() == [date(2024, 1, 15), date(2024, 3, 15)]
+
+
+def test_computed_invalid_day_goes_to_quality_log(tmp_path: Path) -> None:
+    """A day that can't form a valid date (e.g. Feb 30) is routed to the quality
+    log as a row-level failure; the surrounding partition still writes."""
+    import zipfile
+
+    import yaml as yaml_
+    from openpyxl import Workbook
+
+    from microtrade.discover import RawInput
+    from microtrade.ingest import QualityIssue, iter_record_batches
+
+    wb = Workbook()
+    wb.remove(wb.active)
+    ws = wb.create_sheet("ImportsSheet")
+    ws.append(["Position", "Description", "Length", "Type"])
+    ws.append([1, "period", 6, "Char"])
+    ws.append([7, "day", 2, "Char"])
+    workbook_path = tmp_path / "wb.xlsx"
+    wb.save(workbook_path)
+
+    cfg = {
+        "workbooks": {
+            workbook_path.name: {
+                "effective_from": "2020-01",
+                "sheets": {
+                    "ImportsSheet": {
+                        "trade_type": "imports",
+                        "filename_pattern": default_filename_pattern("ImportsSheet"),
+                        "cast": {"period": "Date", "day": "Int64"},
+                        "parse": {"period": "yyyymm_to_date"},
+                        "computed": {
+                            "entry_date": {
+                                "kind": "concat_to_date",
+                                "sources": ["period", "day"],
+                            }
+                        },
+                    }
+                },
+            }
+        }
+    }
+    config_path = tmp_path / "microtrade.yaml"
+    config_path.write_text(yaml_.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    workbook_config = load_config(config_path).get_workbook(workbook_path)
+    imports = read_workbook(workbook_path, workbook_config)["imports"]
+
+    zip_path = tmp_path / "ImportsSheet_202406N.TXT.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("data.fwf", "20240215\n20240230\n20240310\n")  # second row is invalid
+
+    raw = RawInput("imports", 2024, 6, zip_path)
+    captured: list[QualityIssue] = []
+    batches = list(
+        iter_record_batches(
+            raw, imports, chunk_rows=100, encoding="utf-8", on_quality_issue=captured.append
+        )
+    )
+    # 2 rows land (Feb 15 + Mar 10); the Feb 30 row goes to the quality log.
+    total_rows = sum(b.num_rows for b in batches)
+    assert total_rows == 2
+    assert len(captured) == 1
+    assert captured[0].column == "entry_date"
+    assert "day is out of range" in captured[0].error or "Feb" in captured[0].error
+
+
+def test_drop_removes_column_after_computed_uses_it(tmp_path: Path) -> None:
+    """A source column dropped via `drop:` is still parsed so a computed column
+    can reference it, but doesn't appear in the parquet output."""
+    import zipfile
+    from datetime import date
+
+    import polars as pl
+    import yaml as yaml_
+    from openpyxl import Workbook
+
+    from microtrade import pipeline
+
+    wb = Workbook()
+    wb.remove(wb.active)
+    ws = wb.create_sheet("ImportsSheet")
+    ws.append(["Position", "Description", "Length", "Type"])
+    ws.append([1, "period", 6, "Char"])
+    ws.append([7, "day", 2, "Char"])
+    workbook_path = tmp_path / "wb.xlsx"
+    wb.save(workbook_path)
+
+    cfg = {
+        "workbooks": {
+            workbook_path.name: {
+                "effective_from": "2020-01",
+                "sheets": {
+                    "ImportsSheet": {
+                        "trade_type": "imports",
+                        "filename_pattern": default_filename_pattern("ImportsSheet"),
+                        "cast": {"period": "Date", "day": "Int64"},
+                        "parse": {"period": "yyyymm_to_date"},
+                        "computed": {
+                            "entry_date": {
+                                "kind": "concat_to_date",
+                                "sources": ["period", "day"],
+                            }
+                        },
+                        "drop": ["day", "period"],
+                    }
+                },
+            }
+        }
+    }
+    config_path = tmp_path / "microtrade.yaml"
+    config_path.write_text(yaml_.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    workbook_config = load_config(config_path).get_workbook(workbook_path)
+    imports = read_workbook(workbook_path, workbook_config)["imports"]
+    assert imports.dropped_columns == ("day", "period")
+
+    # End-to-end: the dropped columns don't appear in the output parquet, but
+    # entry_date (which used them) does.
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    zip_path = input_dir / "ImportsSheet_202406N.TXT.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("data.fwf", "20240115\n20240315\n")
+
+    spec_dir = tmp_path / "specs"
+    schema.save_spec(imports, spec_dir / "imports" / "v2020-01.yaml")
+    output_dir = tmp_path / "output"
+    summary = pipeline.run(
+        pipeline.PipelineConfig(
+            input_dir=input_dir,
+            output_dir=output_dir,
+            spec_dir=spec_dir,
+            trade_types=("imports",),
+            ytd=False,
+            year=2024,
+            month=6,
+            encoding="utf-8",
+        )
+    )
+    assert summary.failed_count == 0
+    df = pl.scan_parquet(output_dir / "imports" / "**/*.parquet", hive_partitioning=True).collect()
+    assert "entry_date" in df.columns
+    assert "day" not in df.columns
+    assert "period" not in df.columns
+    assert df["entry_date"].to_list() == [date(2024, 1, 15), date(2024, 3, 15)]
+
+
+def test_drop_rejects_unknown_column_name(schema_workbook: Path, tmp_path: Path) -> None:
+    import yaml as yaml_
+
+    cfg = {
+        "workbooks": {
+            schema_workbook.name: {
+                "effective_from": "2020-01",
+                "sheets": {
+                    sheet_title: {
+                        "trade_type": tt,
+                        "filename_pattern": default_filename_pattern(sheet_title),
+                        **({"drop": ["no_such_col"]} if tt == "imports" else {}),
+                    }
+                    for tt, sheet_title in SHEET_TITLES.items()
+                },
+            }
+        }
+    }
+    config_path = tmp_path / "microtrade.yaml"
+    config_path.write_text(yaml_.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    workbook_config = load_config(config_path).get_workbook(schema_workbook)
+
+    with pytest.raises(SpecError, match=r"dropped_columns .* are not columns"):
+        read_workbook(schema_workbook, workbook_config)
+
+
+def test_drop_rejects_emptying_the_schema(schema_workbook: Path, tmp_path: Path) -> None:
+    import yaml as yaml_
+
+    all_names = ["period", "hs_code", "country_coo", "district_entry", "value_usd", "qty_kg"]
+    cfg = {
+        "workbooks": {
+            schema_workbook.name: {
+                "effective_from": "2020-01",
+                "sheets": {
+                    sheet_title: {
+                        "trade_type": tt,
+                        "filename_pattern": default_filename_pattern(sheet_title),
+                        **({"drop": all_names} if tt == "imports" else {}),
+                    }
+                    for tt, sheet_title in SHEET_TITLES.items()
+                },
+            }
+        }
+    }
+    config_path = tmp_path / "microtrade.yaml"
+    config_path.write_text(yaml_.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    workbook_config = load_config(config_path).get_workbook(schema_workbook)
+
+    with pytest.raises(SpecError, match="leave the output schema empty"):
+        read_workbook(schema_workbook, workbook_config)
+
+
 def test_read_workbook_rejects_rename_for_unknown_column(
     schema_workbook: Path, tmp_path: Path
 ) -> None:

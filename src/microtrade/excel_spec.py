@@ -389,6 +389,8 @@ def read_workbook(workbook: Path, workbook_config: WorkbookConfig) -> dict[str, 
                 workbook_id=resolved_workbook_id,
             ),
             derived=_derived_for(columns),
+            computed_columns=tuple(sheet_config.computed),
+            dropped_columns=tuple(sheet_config.drop),
         )
         validate_spec(spec)
         out[trade_type] = spec

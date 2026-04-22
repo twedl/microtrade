@@ -28,6 +28,10 @@ CANONICAL_DTYPES: frozenset[str] = frozenset({"Utf8", "Int64", "Float64", "Date"
 # validation consults this list so typos surface at import-spec time.
 DATE_PARSERS: frozenset[str] = frozenset({"yyyymmdd_to_date", "yyyymm_to_date"})
 
+# Named operations for `Spec.computed_columns`. Each kind has a fixed
+# source-shape and output dtype (see ingest._compute_* dispatchers).
+COMPUTED_KINDS: frozenset[str] = frozenset({"concat_to_date"})
+
 # Named groups that a Spec's `source.filename_pattern` may expose. `year`/`month`
 # are required so discovery can route files to partitions; `flag` is optional and
 # used purely for N/C dedup preference.
@@ -61,6 +65,23 @@ class Column:
 
 
 @dataclass(frozen=True)
+class ComputedColumn:
+    """Output column built from other columns at ingest time (no FWF slice).
+
+    `kind` selects a registered operation (see `COMPUTED_KINDS`). `sources`
+    names other columns by their `effective_name`. Computed columns are
+    real parquet columns: they show up in `build_arrow_schema`,
+    `canonical_columns`, and `diff_specs`.
+    """
+
+    name: str
+    dtype: str
+    kind: str
+    sources: tuple[str, ...]
+    nullable: bool = True
+
+
+@dataclass(frozen=True)
 class SpecSource:
     workbook: str
     sha256: str
@@ -91,6 +112,14 @@ class Spec:
     # Inclusive upper bound on the period range this spec applies to (YYYY-MM).
     # None means open-ended (this spec is still current).
     effective_to: str | None = None
+    # Columns computed from other columns at ingest time. Real parquet
+    # columns in the output; no FWF slice of their own.
+    computed_columns: tuple[ComputedColumn, ...] = ()
+    # Names (effective_name for FWF columns, `name` for computed) to omit
+    # from the parquet output. FWF slicing still runs so computed columns
+    # can reference a dropped source; only the final arrow schema skips
+    # the column.
+    dropped_columns: tuple[str, ...] = ()
 
     @property
     def ordered_columns(self) -> tuple[Column, ...]:
@@ -220,6 +249,47 @@ def validate_spec(spec: Spec) -> None:
             f"end {spec.min_record_length}"
         )
 
+    if spec.computed_columns:
+        _validate_computed_columns(spec)
+    if spec.dropped_columns:
+        _validate_dropped_columns(spec)
+
+
+def _validate_dropped_columns(spec: Spec) -> None:
+    available = {c.effective_name for c in spec.columns} | {c.name for c in spec.computed_columns}
+    unknown = sorted(set(spec.dropped_columns) - available)
+    if unknown:
+        raise SpecError(
+            f"dropped_columns {unknown} are not columns in this spec (known: {sorted(available)})"
+        )
+    if available == set(spec.dropped_columns):
+        raise SpecError("dropped_columns would leave the output schema empty")
+
+
+def _validate_computed_columns(spec: Spec) -> None:
+    effective_names = {c.effective_name for c in spec.columns}
+    all_output_names = set(effective_names)
+    for comp in spec.computed_columns:
+        if comp.dtype not in CANONICAL_DTYPES:
+            raise SpecError(
+                f"computed column {comp.name!r} has non-canonical dtype {comp.dtype!r}; "
+                f"allowed: {sorted(CANONICAL_DTYPES)}"
+            )
+        if comp.kind not in COMPUTED_KINDS:
+            raise SpecError(
+                f"computed column {comp.name!r}: unknown kind {comp.kind!r}; "
+                f"allowed: {sorted(COMPUTED_KINDS)}"
+            )
+        missing = [s for s in comp.sources if s not in effective_names]
+        if missing:
+            raise SpecError(
+                f"computed column {comp.name!r}: sources {missing} are not columns "
+                f"in this spec (known: {sorted(effective_names)})"
+            )
+        if comp.name in all_output_names:
+            raise SpecError(f"computed column {comp.name!r} collides with an existing column name")
+        all_output_names.add(comp.name)
+
 
 def _opt_str(data: Mapping[str, Any], key: str) -> str | None:
     """Read an optional string from a dict, returning None when absent or empty.
@@ -284,10 +354,34 @@ def spec_to_dict(spec: Spec) -> dict[str, Any]:
             source["filename_pattern"] = spec.source.filename_pattern
         out["source"] = source
     out["columns"] = [_column_to_dict(c) for c in spec.columns]
+    if spec.computed_columns:
+        out["computed_columns"] = [_computed_column_to_dict(c) for c in spec.computed_columns]
+    if spec.dropped_columns:
+        out["dropped_columns"] = list(spec.dropped_columns)
     if spec.derived:
         out["derived"] = [{name: expr} for name, expr in spec.derived]
     out["partition_by"] = list(spec.partition_by)
     return out
+
+
+def _computed_column_to_dict(col: ComputedColumn) -> dict[str, Any]:
+    return {
+        "name": col.name,
+        "dtype": col.dtype,
+        "kind": col.kind,
+        "sources": list(col.sources),
+        "nullable": col.nullable,
+    }
+
+
+def _computed_column_from_dict(data: dict[str, Any]) -> ComputedColumn:
+    return ComputedColumn(
+        name=str(data["name"]),
+        dtype=str(data["dtype"]),
+        kind=str(data["kind"]),
+        sources=tuple(str(s) for s in data["sources"]),
+        nullable=bool(data.get("nullable", True)),
+    )
 
 
 def spec_from_dict(data: dict[str, Any]) -> Spec:
@@ -308,6 +402,9 @@ def spec_from_dict(data: dict[str, Any]) -> Spec:
     derived: tuple[tuple[str, str], ...] = tuple(
         (name, expr) for item in derived_raw for name, expr in item.items()
     )
+    computed_raw = data.get("computed_columns") or []
+    computed = tuple(_computed_column_from_dict(c) for c in computed_raw)
+    dropped_raw = data.get("dropped_columns") or []
     spec = Spec(
         trade_type=str(data["trade_type"]),
         version=str(data["version"]),
@@ -318,6 +415,8 @@ def spec_from_dict(data: dict[str, Any]) -> Spec:
         derived=derived,
         partition_by=tuple(data.get("partition_by", ("year", "month"))),
         effective_to=_opt_str(data, "effective_to"),
+        computed_columns=computed,
+        dropped_columns=tuple(str(n) for n in dropped_raw),
     )
     validate_spec(spec)
     return spec
@@ -430,24 +529,30 @@ def canonical_columns(specs: list[Spec]) -> tuple[CanonicalColumn, ...]:
     """
     ordered_names: list[str] = []
     seen: dict[str, CanonicalColumn] = {}
-    for spec in sorted(specs, key=lambda s: s.effective_from):
-        for col in spec.ordered_columns:
-            name = col.effective_name
-            existing = seen.get(name)
-            if existing is None:
-                ordered_names.append(name)
-                seen[name] = CanonicalColumn(name=name, dtype=col.dtype, nullable=col.nullable)
-                continue
-            if existing.dtype != col.dtype:
-                raise SpecError(
-                    f"column {name!r} changes dtype across spec versions: "
-                    f"{existing.dtype!r} -> {col.dtype!r}"
-                )
-            seen[name] = CanonicalColumn(
-                name=name,
-                dtype=col.dtype,
-                nullable=existing.nullable or col.nullable,
+
+    def _merge(name: str, dtype: str, nullable: bool) -> None:
+        existing = seen.get(name)
+        if existing is None:
+            ordered_names.append(name)
+            seen[name] = CanonicalColumn(name=name, dtype=dtype, nullable=nullable)
+            return
+        if existing.dtype != dtype:
+            raise SpecError(
+                f"column {name!r} changes dtype across spec versions: "
+                f"{existing.dtype!r} -> {dtype!r}"
             )
+        seen[name] = CanonicalColumn(name=name, dtype=dtype, nullable=existing.nullable or nullable)
+
+    for spec in sorted(specs, key=lambda s: s.effective_from):
+        dropped = set(spec.dropped_columns)
+        for col in spec.ordered_columns:
+            if col.effective_name in dropped:
+                continue
+            _merge(col.effective_name, col.dtype, col.nullable)
+        for comp in spec.computed_columns:
+            if comp.name in dropped:
+                continue
+            _merge(comp.name, comp.dtype, comp.nullable)
     return tuple(seen[n] for n in ordered_names)
 
 

@@ -95,6 +95,32 @@ The default is `yyyymmdd_to_date`; set
 `parse: {year_month: yyyymm_to_date}` for `YYYYMM` fields. Only
 meaningful for columns whose final dtype is Date.
 
+`computed` (optional, per sheet) builds new parquet columns from other
+columns at ingest time. Keyed by the output column's name; values
+declare a named operation (`kind`) and its `sources`. First available
+operation:
+
+- `concat_to_date`: `sources: [period_date_col, day_int_col]` → Date
+  column combining a YYYYMM `Date` and a day-of-month `Int64` into a
+  full YYYYMMDD date. Row-level failures (e.g. Feb 30) go to the
+  quality log like any other parse error.
+
+```yaml
+computed:
+  entry_date:
+    kind: concat_to_date
+    sources: [period, day_of_month]
+```
+
+`drop` (optional, per sheet) omits named columns from the parquet
+output. Runs after cast/rename/computed, so a dropped column can still
+feed a computed column and disappear afterward:
+
+```yaml
+drop:
+  - day_of_month       # used by `entry_date`, then dropped from the output
+```
+
 A worked example lives at [`examples/microtrade.yaml`](examples/microtrade.yaml),
 paired with `examples/microdata-layout.xls`.
 

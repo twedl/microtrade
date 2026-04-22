@@ -6,6 +6,23 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-04-22
+
+### Added
+
+- `Spec.computed_columns` / `SheetConfig.computed` — columns built from
+  other columns at ingest time (no FWF slice). Real parquet columns in
+  the output; show up in `build_arrow_schema`, `canonical_columns`, and
+  `diff_specs`. First named operation: `concat_to_date` merges a YYYYMM
+  Date column with a DD Int column into a YYYYMMDD Date.
+- `schema.ComputedColumn` dataclass, `schema.COMPUTED_KINDS` registry.
+- Row-level computation failures (e.g. Feb 30) route through the
+  existing quality-issue log instead of aborting the partition.
+- `Spec.dropped_columns` / `SheetConfig.drop` — omit named columns from
+  the parquet output. FWF slicing still runs so a computed column can
+  reference a dropped source before it disappears. Validated against
+  real column names; rejects a drop list that would empty the schema.
+
 ## [0.1.6] - 2026-04-21
 
 ### Added
@@ -231,7 +248,8 @@ and CLI command stay `microtrade`.
   `inspect`) ship implemented; the package is fully typed (`py.typed`
   marker included in the wheel).
 
-[unreleased]: https://github.com/twedl/microtrade/compare/v0.1.6...HEAD
+[unreleased]: https://github.com/twedl/microtrade/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/twedl/microtrade/releases/tag/v0.1.7
 [0.1.6]: https://github.com/twedl/microtrade/releases/tag/v0.1.6
 [0.1.5]: https://github.com/twedl/microtrade/releases/tag/v0.1.5
 [0.1.4]: https://github.com/twedl/microtrade/releases/tag/v0.1.4
