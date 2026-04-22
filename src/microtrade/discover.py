@@ -22,10 +22,8 @@ from pathlib import Path
 
 from microtrade.schema import TRADE_TYPES, Spec, load_all, validate_filename_pattern
 
+# None (unflagged) wins over N wins over C when dedup'ing a (trade_type, year, month).
 _FLAG_PRIORITY: Mapping[str, int] = {"N": 1, "C": 2}
-# None (unflagged) ranks 0 (most authoritative); N=1; C=2. When a
-# filename_pattern's `flag` group is optional, an unflagged file wins over
-# both N and C for the same (trade_type, year, month).
 
 
 class DiscoverError(ValueError):
@@ -183,3 +181,18 @@ def _flag_rank(flag: str | None) -> int:
 def ytd_filter(raw_inputs: Iterable[RawInput], *, current_year: int) -> list[RawInput]:
     """Keep only inputs whose year matches `current_year`. Prior years are frozen."""
     return [r for r in raw_inputs if r.year == current_year]
+
+
+def latest_snapshot_per_year(candidates: Iterable[RawInput]) -> list[RawInput]:
+    """Pick the file with the highest `month` per `(trade_type, year)`.
+
+    Files are YTD snapshots, so a YYYY-12 file supersedes YYYY-11 and earlier;
+    the pipeline only ever needs the latest snapshot per year.
+    """
+    latest: dict[tuple[str, int], RawInput] = {}
+    for raw in candidates:
+        key = (raw.trade_type, raw.year)
+        current = latest.get(key)
+        if current is None or raw.month > current.month:
+            latest[key] = raw
+    return sorted(latest.values(), key=lambda r: (r.trade_type, r.year, r.month))

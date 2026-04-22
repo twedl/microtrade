@@ -22,6 +22,11 @@ TRADE_TYPES: tuple[str, ...] = ("imports", "exports_us", "exports_nonus")
 
 CANONICAL_DTYPES: frozenset[str] = frozenset({"Utf8", "Int64", "Float64", "Date"})
 
+# Column name used by ingest to route rows to per-(year, month) partitions.
+# Must be a Date column in the resolved spec; `validate_spec` rejects dropping
+# it so the name is a stable contract across ingest and `MultiPartitionWriter`.
+ROUTING_COLUMN: str = "period"
+
 # Parser names recognized by ingest for the `parse` field on a Column.
 # Currently only Date columns need a parse; strings/ints/floats use the
 # stdlib defaults. Keep in sync with `ingest._DATE_FORMATS` - config-layer
@@ -264,10 +269,10 @@ def _validate_dropped_columns(spec: Spec) -> None:
         )
     if available == set(spec.dropped_columns):
         raise SpecError("dropped_columns would leave the output schema empty")
-    if "period" in spec.dropped_columns:
+    if ROUTING_COLUMN in spec.dropped_columns:
         raise SpecError(
-            "cannot drop the 'period' column; it is required to route rows to "
-            "per-(year, month) partitions"
+            f"cannot drop {ROUTING_COLUMN!r}; it is required to route rows to "
+            f"per-(year, month) partitions"
         )
 
 

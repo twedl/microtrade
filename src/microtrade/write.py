@@ -18,6 +18,8 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+from microtrade.schema import ROUTING_COLUMN
+
 
 class WriteError(RuntimeError):
     """Raised when a partition write fails in a way the caller should surface."""
@@ -101,14 +103,11 @@ class PartitionWriter:
 
 
 class MultiPartitionWriter:
-    """Route rows to per-`(year, month)` Parquet partitions based on the
-    `period` column of each incoming batch.
+    """Route rows to per-`(year, month)` partitions by each row's `period`.
 
-    A single YTD-snapshot input file typically spans multiple months; each
-    row's `period` Date column picks the destination partition. Child
-    PartitionWriters are opened lazily on first row for each partition,
-    and all commit (atomic rename) together on successful exit or roll
-    back (delete .tmp) together on exception.
+    Child PartitionWriters open lazily on the first row for their
+    partition, and all commit (atomic rename) together on successful exit
+    or roll back (delete .tmp) together on exception.
     """
 
     def __init__(
@@ -125,10 +124,10 @@ class MultiPartitionWriter:
         self.compression = compression
         self._writers: dict[tuple[int, int], PartitionWriter] = {}
         self._active = False
-        if "period" not in arrow_schema.names:
+        if ROUTING_COLUMN not in arrow_schema.names:
             raise WriteError(
-                "MultiPartitionWriter requires a 'period' column in the arrow schema "
-                "(used to route rows to per-month partitions)"
+                f"MultiPartitionWriter requires a {ROUTING_COLUMN!r} column in the "
+                f"arrow schema (used to route rows to per-month partitions)"
             )
 
     def __enter__(self) -> Self:
@@ -171,7 +170,7 @@ class MultiPartitionWriter:
         if batch.num_rows == 0:
             return
 
-        period = batch.column("period")
+        period = batch.column(ROUTING_COLUMN)
         years = pc.year(period).to_pylist()
         months = pc.month(period).to_pylist()
         groups: dict[tuple[int, int], list[int]] = {}

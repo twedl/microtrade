@@ -43,6 +43,7 @@ from microtrade.ingest import (
     iter_record_batches,
 )
 from microtrade.schema import (
+    ROUTING_COLUMN,
     TRADE_TYPES,
     CanonicalColumn,
     Spec,
@@ -108,11 +109,9 @@ class PartitionResult:
     duration_seconds: float
     output_path: str
     status: Status
-    # The snapshot month captured from the source filename. Always equals
-    # `year` combined with `snapshot_month` for the file this partition
-    # came from. Routing: a single YTD snapshot (e.g. YYYY-06) writes
-    # multiple PartitionResults, one per destination month (Jan..Jun).
-    snapshot_month: int = 0
+    # Month pulled from the source filename; may differ from `month` when a
+    # single YTD file writes multiple partitions (Jan..Jun from a YYYY-06).
+    snapshot_month: int
     error: str | None = None
 
 
@@ -201,20 +200,7 @@ def _select_inputs(config: PipelineConfig, specs_by_type: dict[str, list[Spec]])
             config.current_year if config.current_year is not None else datetime.now(tz=UTC).year
         )
         candidates = discover.ytd_filter(candidates, current_year=current_year)
-    return _latest_snapshot_per_year(candidates)
-
-
-def _latest_snapshot_per_year(candidates: list[RawInput]) -> list[RawInput]:
-    """Files are YTD snapshots: a YYYY-12 file supersedes YYYY-11 and earlier
-    for the same year. Keep only the file with the highest `month` per
-    `(trade_type, year)`; the rest are strict subsets."""
-    latest: dict[tuple[str, int], RawInput] = {}
-    for raw in candidates:
-        key = (raw.trade_type, raw.year)
-        current = latest.get(key)
-        if current is None or raw.month > current.month:
-            latest[key] = raw
-    return sorted(latest.values(), key=lambda r: (r.trade_type, r.year, r.month))
+    return discover.latest_snapshot_per_year(candidates)
 
 
 def _process_one(
@@ -282,29 +268,12 @@ def _process_one(
             ]
 
         duration = time.perf_counter() - start
-        rows_skipped = issue_sink.count
-        rows_skipped_logged = issue_sink.count_logged
-        if not partition_rows:
-            return [
-                PartitionResult(
-                    trade_type=raw.trade_type,
-                    year=raw.year,
-                    month=raw.month,
-                    input_path=str(raw.path),
-                    input_sha256=input_sha,
-                    spec_version=spec.version,
-                    rows_written=0,
-                    rows_skipped=rows_skipped,
-                    rows_skipped_logged=rows_skipped_logged,
-                    duration_seconds=duration,
-                    output_path="",
-                    status=STATUS_OK,
-                    snapshot_month=raw.month,
-                )
-            ]
 
-        return [
-            PartitionResult(
+        def success(year: int, month: int, rows: int, output_path: str) -> PartitionResult:
+            # Row-level skipped counts are tracked at the file level and
+            # attributed to each partition line so a consumer summing the
+            # manifest never undercounts; duration is also per-file.
+            return PartitionResult(
                 trade_type=raw.trade_type,
                 year=year,
                 month=month,
@@ -312,17 +281,18 @@ def _process_one(
                 input_sha256=input_sha,
                 spec_version=spec.version,
                 rows_written=rows,
-                # Row-level skipped counts are tracked at the file level; we
-                # attribute the whole count to each partition line so a
-                # consumer summing the manifest never undercounts. Duration
-                # is similarly per-file.
-                rows_skipped=rows_skipped,
-                rows_skipped_logged=rows_skipped_logged,
+                rows_skipped=issue_sink.count,
+                rows_skipped_logged=issue_sink.count_logged,
                 duration_seconds=duration,
-                output_path=str(final_paths[(year, month)]),
+                output_path=output_path,
                 status=STATUS_OK,
                 snapshot_month=raw.month,
             )
+
+        if not partition_rows:
+            return [success(raw.year, raw.month, 0, "")]
+        return [
+            success(year, month, rows, str(final_paths[(year, month)]))
             for (year, month), rows in sorted(partition_rows.items())
         ]
 
@@ -330,50 +300,50 @@ def _process_one(
 def _route_rows(
     batch: pa.RecordBatch, raw: RawInput, issue_sink: _QualityIssueWriter
 ) -> pa.RecordBatch:
-    """Filter out rows whose `period` doesn't fit the snapshot's year window.
+    """Filter rows to those whose `period` falls inside the snapshot's window.
 
-    A YTD snapshot for (year, snapshot_month) claims rows in that year with
-    period-month <= snapshot_month. Rows outside that range or with null
-    period go to the quality log and are excluded from the batch.
+    Out-of-window or null `period` values route to the quality log. The
+    happy-path mask is vectorized; only rejected rows are iterated in
+    Python to format per-row log entries.
     """
-    period = batch.column("period")
-    null_mask = pc.is_null(period).to_pylist()
-    years = pc.year(period).to_pylist()
-    months = pc.month(period).to_pylist()
+    period = batch.column(ROUTING_COLUMN)
+    valid = pc.is_valid(period)
+    year_arr = pc.year(period)
+    month_arr = pc.month(period)
+    in_window = pc.and_(
+        valid,
+        pc.and_(
+            pc.equal(year_arr, raw.year),
+            pc.less_equal(month_arr, raw.month),
+        ),
+    )
+    if pc.all(in_window).as_py():
+        return batch
 
-    keep: list[bool] = []
-    for i in range(batch.num_rows):
-        if null_mask[i]:
-            issue_sink(
-                QualityIssue(
-                    file=raw.path.name,
-                    line_no=i + 1,
-                    column="period",
-                    error="period is null; row cannot be routed to a partition",
-                    raw_line="",
-                )
+    # Log only the rejected rows (typically a small minority).
+    rejected = pc.invert(in_window)
+    rejected_indices = pc.indices_nonzero(rejected).to_pylist()
+    valid_flags = valid.to_pylist()
+    years = year_arr.to_pylist()
+    months = month_arr.to_pylist()
+    for i in rejected_indices:
+        if not valid_flags[i]:
+            error = "period is null; row cannot be routed to a partition"
+        else:
+            error = (
+                f"row period {int(years[i])}-{int(months[i]):02d} is outside the "
+                f"snapshot window ({raw.year}-01..{raw.year}-{raw.month:02d})"
             )
-            keep.append(False)
-            continue
-        row_year = int(years[i])
-        row_month = int(months[i])
-        if row_year != raw.year or row_month > raw.month:
-            issue_sink(
-                QualityIssue(
-                    file=raw.path.name,
-                    line_no=i + 1,
-                    column="period",
-                    error=(
-                        f"row period {row_year}-{row_month:02d} is outside the "
-                        f"snapshot window ({raw.year}-01..{raw.year}-{raw.month:02d})"
-                    ),
-                    raw_line="",
-                )
+        issue_sink(
+            QualityIssue(
+                file=raw.path.name,
+                line_no=i + 1,
+                column=ROUTING_COLUMN,
+                error=error,
+                raw_line="",
             )
-            keep.append(False)
-            continue
-        keep.append(True)
-    return batch.filter(pa.array(keep))
+        )
+    return batch.filter(in_window)
 
 
 def _check_skip_rate(rows_written: int, rows_skipped: int, threshold: float) -> None:
@@ -418,6 +388,7 @@ def _failure_result(
         duration_seconds=time.perf_counter() - start,
         output_path=output_path,
         status=STATUS_FAILED,
+        snapshot_month=raw.month,
         error=f"{type(error).__name__}: {error}",
     )
 
