@@ -35,12 +35,7 @@ def _input_filename(trade_type: str, year: int, month: int, flag: str = "N") -> 
 
 
 def _workbook_config(tmp_path: Path, workbook: Path, effective_from: str, **kwargs):
-    """Build a microtrade.yaml next to `workbook` and return its WorkbookConfig.
-
-    Pipeline tests always cast `period` to Date so the synthetic workbook's
-    Char-declared period column routes through MultiPartitionWriter.
-    """
-    kwargs.setdefault("cast_period_to_date", True)
+    """Build a microtrade.yaml next to `workbook` and return its WorkbookConfig."""
     cfg_path = build_project_config(
         tmp_path / f"config_{effective_from}.yaml", workbook, effective_from, **kwargs
     )
@@ -248,7 +243,9 @@ def test_pipeline_row_level_error_logged_to_quality_issues(prepared_env) -> None
     spec = excel_spec.read_workbook(workbook, _workbook_config(env["tmp"], workbook, "2020-01"))[
         "imports"
     ]
-    good = render_fwf_lines(spec, n_rows=3, seed=0)
+    good = render_ytd_fwf_lines(
+        spec, snapshot_year=2024, snapshot_month=1, rows_per_month=3, seed=0
+    )
     col = {c.physical_name: c for c in spec.columns}["value_usd"]
     bad_line = good[0][: col.start - 1] + "ABCDEABCDEABCDE" + good[0][col.start - 1 + col.length :]
     make_zip_input(target, [good[0], bad_line, good[1]])
@@ -281,7 +278,13 @@ def _make_bad_imports_zip(env: dict[str, Path], n_good: int, n_bad: int) -> Path
         "imports"
     ]
     col = {c.physical_name: c for c in spec.columns}["value_usd"]
-    good = render_fwf_lines(spec, n_rows=n_good + n_bad, seed=0)
+    good = render_ytd_fwf_lines(
+        spec,
+        snapshot_year=2024,
+        snapshot_month=1,
+        rows_per_month=n_good + n_bad,
+        seed=0,
+    )
     lines = list(good[:n_good])
     for src in good[n_good : n_good + n_bad]:
         lines.append(src[: col.start - 1] + "ABCDEABCDEABCDE" + src[col.start - 1 + col.length :])

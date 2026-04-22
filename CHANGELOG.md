@@ -6,6 +6,21 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-04-22
+
+### Changed
+
+- **Breaking:** The per-row routing column is now per-spec instead of a
+  hardcoded `"period"`. Every sheet in `microtrade.yaml` (and every
+  committed YAML spec) now carries a `routing_column` field naming the
+  Date-typed column used to bucket rows into `year=/month=/` partitions.
+  Upstream schemas call this column different things (`period`,
+  `year_month`, `ref_month`, …) - point the field at whichever column
+  your data actually uses. The value defaults to `"period"` when
+  omitted, so existing configs whose date column is literally named
+  `period` keep working. `validate_spec` now rejects a spec whose
+  `routing_column` is missing, non-Date, or listed in `dropped_columns`.
+
 ## [0.2.1] - 2026-04-22
 
 ### Changed

@@ -18,8 +18,6 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-from microtrade.schema import ROUTING_COLUMN
-
 
 class WriteError(RuntimeError):
     """Raised when a partition write fails in a way the caller should surface."""
@@ -103,11 +101,13 @@ class PartitionWriter:
 
 
 class MultiPartitionWriter:
-    """Route rows to per-`(year, month)` partitions by each row's `period`.
+    """Route rows to per-`(year, month)` partitions by each row's routing column.
 
     Child PartitionWriters open lazily on the first row for their
     partition, and all commit (atomic rename) together on successful exit
-    or roll back (delete .tmp) together on exception.
+    or roll back (delete .tmp) together on exception. The routing column
+    is specified per-spec (see `Spec.routing_column`) so upstream schemas
+    don't have to rename their date column to a single conventional name.
     """
 
     def __init__(
@@ -116,18 +116,20 @@ class MultiPartitionWriter:
         dataset_root: Path,
         trade_type: str,
         arrow_schema: pa.Schema,
+        routing_column: str,
         compression: str = "zstd",
     ) -> None:
         self.dataset_root = dataset_root
         self.trade_type = trade_type
         self.arrow_schema = arrow_schema
+        self.routing_column = routing_column
         self.compression = compression
         self._writers: dict[tuple[int, int], PartitionWriter] = {}
         self._active = False
-        if ROUTING_COLUMN not in arrow_schema.names:
+        if routing_column not in arrow_schema.names:
             raise WriteError(
-                f"MultiPartitionWriter requires a {ROUTING_COLUMN!r} column in the "
-                f"arrow schema (used to route rows to per-month partitions)"
+                f"MultiPartitionWriter: routing_column {routing_column!r} not found in "
+                f"arrow schema (got {arrow_schema.names})"
             )
 
     def __enter__(self) -> Self:
@@ -170,7 +172,7 @@ class MultiPartitionWriter:
         if batch.num_rows == 0:
             return
 
-        period = batch.column(ROUTING_COLUMN)
+        period = batch.column(self.routing_column)
         years = pc.year(period).to_pylist()
         months = pc.month(period).to_pylist()
         groups: dict[tuple[int, int], list[int]] = {}

@@ -22,11 +22,6 @@ TRADE_TYPES: tuple[str, ...] = ("imports", "exports_us", "exports_nonus")
 
 CANONICAL_DTYPES: frozenset[str] = frozenset({"Utf8", "Int64", "Float64", "Date"})
 
-# Column name used by ingest to route rows to per-(year, month) partitions.
-# Must be a Date column in the resolved spec; `validate_spec` rejects dropping
-# it so the name is a stable contract across ingest and `MultiPartitionWriter`.
-ROUTING_COLUMN: str = "period"
-
 # Parser names recognized by ingest for the `parse` field on a Column.
 # Currently only Date columns need a parse; strings/ints/floats use the
 # stdlib defaults. Keep in sync with `ingest._DATE_FORMATS` - config-layer
@@ -111,6 +106,12 @@ class Spec:
     effective_from: str
     record_length: int
     columns: tuple[Column, ...]
+    # Name of the Date-typed column (effective_name or computed.name) that
+    # `MultiPartitionWriter` uses to route each row to a (year, month)
+    # partition. Required because the physical column varies across
+    # upstream schemas (`period`, `year_month`, etc.). `validate_spec`
+    # checks the named column exists, is Date, and is not dropped.
+    routing_column: str = "period"
     source: SpecSource | None = None
     derived: tuple[tuple[str, str], ...] = ()
     partition_by: tuple[str, ...] = ("year", "month")
@@ -258,6 +259,7 @@ def validate_spec(spec: Spec) -> None:
         _validate_computed_columns(spec)
     if spec.dropped_columns:
         _validate_dropped_columns(spec)
+    _validate_routing_column(spec)
 
 
 def _validate_dropped_columns(spec: Spec) -> None:
@@ -269,10 +271,28 @@ def _validate_dropped_columns(spec: Spec) -> None:
         )
     if available == set(spec.dropped_columns):
         raise SpecError("dropped_columns would leave the output schema empty")
-    if ROUTING_COLUMN in spec.dropped_columns:
+
+
+def _validate_routing_column(spec: Spec) -> None:
+    """Check the declared routing column exists, is Date-typed, and isn't dropped."""
+    dtype_by_name: dict[str, str] = {c.effective_name: c.dtype for c in spec.columns}
+    for comp in spec.computed_columns:
+        dtype_by_name[comp.name] = comp.dtype
+    dtype = dtype_by_name.get(spec.routing_column)
+    if dtype is None:
         raise SpecError(
-            f"cannot drop {ROUTING_COLUMN!r}; it is required to route rows to "
-            f"per-(year, month) partitions"
+            f"routing_column {spec.routing_column!r} is not a column in this spec "
+            f"(known: {sorted(dtype_by_name)})"
+        )
+    if dtype != "Date":
+        raise SpecError(
+            f"routing_column {spec.routing_column!r} must be a Date column (got {dtype!r}); "
+            f"use `cast` + `parse` in the project config to promote it"
+        )
+    if spec.routing_column in spec.dropped_columns:
+        raise SpecError(
+            f"routing_column {spec.routing_column!r} cannot appear in dropped_columns; "
+            f"it is required to route rows to per-(year, month) partitions"
         )
 
 
@@ -363,6 +383,7 @@ def spec_to_dict(spec: Spec) -> dict[str, Any]:
         if spec.source.filename_pattern is not None:
             source["filename_pattern"] = spec.source.filename_pattern
         out["source"] = source
+    out["routing_column"] = spec.routing_column
     out["columns"] = [_column_to_dict(c) for c in spec.columns]
     if spec.computed_columns:
         out["computed_columns"] = [_computed_column_to_dict(c) for c in spec.computed_columns]
@@ -421,6 +442,7 @@ def spec_from_dict(data: dict[str, Any]) -> Spec:
         effective_from=str(data["effective_from"]),
         record_length=int(data["record_length"]),
         columns=tuple(_column_from_dict(c) for c in data["columns"]),
+        routing_column=str(data.get("routing_column", "period")),
         source=source,
         derived=derived,
         partition_by=tuple(data.get("partition_by", ("year", "month"))),

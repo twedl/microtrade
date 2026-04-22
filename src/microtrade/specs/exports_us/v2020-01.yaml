@@ -7,15 +7,17 @@ source:
   workbook: microdata-layout.xls
   sha256: b49821ef787426e9bed8a39e1f123bd6c408276946b1ef0b9503bee9d4634823
   sheet: SHEETNAME002
-  imported_at: '2026-04-21T17:00:34+00:00'
+  imported_at: '2026-04-22T14:09:55+00:00'
   workbook_id: MICRODATA2020
   filename_pattern: ^SHEETNAME002_(?P<year>\d{4})(?P<month>\d{2})(?P<flag>[NC])\.TXT\.zip$
+routing_column: year_month
 columns:
 - physical_name: year_month
   start: 1
   length: 6
-  dtype: Utf8
+  dtype: Date
   nullable: true
+  parse: yyyymm_to_date
 - physical_name: col2
   start: 8
   length: 2
@@ -101,6 +103,9 @@ columns:
   length: 13
   dtype: Utf8
   nullable: true
+derived:
+- year: year(year_month)
+- month: month(year_month)
 partition_by:
 - year
 - month

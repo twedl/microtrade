@@ -55,6 +55,11 @@ workbooks:
       Imports:
         trade_type: imports       # optional; defaults to positional (sheet index -> TRADE_TYPES)
         filename_pattern: '^XYZ12345_Im(?P<year>\d{4})(?P<month>\d{2})\.zip$'
+        routing_column: year_month  # per-row Date column; used to partition output
+        cast:
+          year_month: Date          # workbook ships as Char; promote to Date
+        parse:
+          year_month: yyyymm_to_date
 
   Schedule_Record_Layout_2024.xlsx:
     effective_from: 2024-01
@@ -62,6 +67,7 @@ workbooks:
       Imports:
         trade_type: imports
         filename_pattern: '^IMP_(?P<year>\d{4})(?P<month>\d{2})(?P<flag>[NC])\.TXT\.zip$'
+        routing_column: period
         # Upstream renamed `business_number` -> `business_number_9_digit`;
         # keep the stable name in the combined dataset.
         rename:
@@ -69,14 +75,24 @@ workbooks:
       ExportsUS:
         trade_type: exports_us
         filename_pattern: '^EXUS_(?P<year>\d{4})(?P<month>\d{2})(?P<flag>[NC])\.TXT\.zip$'
+        routing_column: period
       ExportsNonUS:
         trade_type: exports_nonus
         filename_pattern: '^EXNONUS_(?P<year>\d{4})(?P<month>\d{2})(?P<flag>[NC])\.TXT\.zip$'
+        routing_column: period
 ```
 
 Required regex groups: `year` (4 digits) and `month` (2 digits). Optional:
 `flag` — when upstream publishes both `N` and `C` copies of the same period,
 `N` wins at discovery time.
+
+`routing_column` (defaults to `period`) names the per-row Date column that
+the pipeline uses to bucket rows into `year=YYYY/month=MM` partitions. It
+must resolve to a Date column in the final spec — either because the
+workbook already declares it that way, or because `cast` + `parse` promote
+it. Upstream schemas name this column differently (`period`, `year_month`,
+`ref_month`, …) so the field is per-sheet rather than a hardcoded
+convention.
 
 `rename` (optional, per sheet) maps a workbook's *physical* column name
 (the Description cell) to the *logical* name that shows up in the combined

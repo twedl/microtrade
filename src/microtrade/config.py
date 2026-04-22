@@ -64,6 +64,13 @@ class SheetConfig:
     """Per-sheet rules within one workbook."""
 
     filename_pattern: str
+    # Name of the column that carries a YYYYMM (or YYYYMMDD) date value
+    # identifying which month each row belongs to. Ingest uses it to
+    # route rows to (year, month) partitions. The column does not have
+    # to be literally named "period" - set this to whatever the sheet
+    # actually calls it (e.g. "year_month"). The referenced column must
+    # end up Date-typed in the spec (via workbook dtype or `cast` here).
+    routing_column: str = "period"
     trade_type: str | None = None  # None -> positional mapping
     # Physical-to-logical column renames applied at import time. Each entry
     # `physical: logical` stamps `logical_name=logical` on the Column whose
@@ -231,8 +238,10 @@ def _sheet_from_dict(workbook_name: str, sheet_name: str, data: dict[str, Any]) 
         raise ConfigError(
             f"workbook {workbook_name!r} sheet {sheet_name!r}: 'drop' must be a list of strings"
         )
+    routing_column = data.get("routing_column")
     return SheetConfig(
         filename_pattern=pattern,
+        routing_column=str(routing_column) if routing_column is not None else "period",
         trade_type=str(trade_type) if trade_type is not None else None,
         rename=rename,
         cast=cast,

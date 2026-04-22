@@ -299,10 +299,16 @@ def _apply_parse(
     )
 
 
-def _derived_for(columns: tuple[Column, ...]) -> tuple[tuple[str, str], ...]:
+def _derived_for(columns: tuple[Column, ...], routing_column: str) -> tuple[tuple[str, str], ...]:
     for col in columns:
-        if col.effective_name == "period" and col.parse in {"yyyymm_to_date", "yyyymmdd_to_date"}:
-            return (("year", "year(period)"), ("month", "month(period)"))
+        if col.effective_name == routing_column and col.parse in {
+            "yyyymm_to_date",
+            "yyyymmdd_to_date",
+        }:
+            return (
+                ("year", f"year({routing_column})"),
+                ("month", f"month({routing_column})"),
+            )
     return ()
 
 
@@ -380,6 +386,7 @@ def read_workbook(workbook: Path, workbook_config: WorkbookConfig) -> dict[str, 
             effective_to=workbook_config.effective_to,
             record_length=record_length,
             columns=columns,
+            routing_column=sheet_config.routing_column,
             source=SpecSource(
                 workbook=workbook.name,
                 sha256=sha,
@@ -388,7 +395,7 @@ def read_workbook(workbook: Path, workbook_config: WorkbookConfig) -> dict[str, 
                 filename_pattern=sheet_config.filename_pattern,
                 workbook_id=resolved_workbook_id,
             ),
-            derived=_derived_for(columns),
+            derived=_derived_for(columns, sheet_config.routing_column),
             computed_columns=tuple(sheet_config.computed),
             dropped_columns=tuple(sheet_config.drop),
         )

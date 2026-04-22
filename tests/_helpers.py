@@ -68,14 +68,13 @@ def build_project_config(
     effective_to: str | None = None,
     workbook_id: str | None = None,
     sheet_titles: dict[str, str] | None = None,
-    cast_period_to_date: bool = False,
 ) -> Path:
     """Write a `microtrade.yaml` referencing `workbook_path` with default patterns.
 
     Produces one entry per (trade_type, sheet_title) pair in `sheet_titles`
-    (defaulting to `SHEET_TITLES`). `cast_period_to_date=True` adds the
-    Date cast + yyyymm parse for the `period` column - required for any
-    pipeline test that feeds the synthetic workbook into MultiPartitionWriter.
+    (defaulting to `SHEET_TITLES`). The synthetic workbook's `period` column
+    is declared Date + yyyymm_to_date at the workbook level, so no cast or
+    parse overrides are needed here.
     """
     titles = sheet_titles if sheet_titles is not None else SHEET_TITLES
     sheets_cfg: dict[str, object] = {}
@@ -84,9 +83,6 @@ def build_project_config(
             "trade_type": trade_type,
             "filename_pattern": default_filename_pattern(sheet_title),
         }
-        if cast_period_to_date:
-            entry["cast"] = {"period": "Date"}
-            entry["parse"] = {"period": "yyyymm_to_date"}
         sheets_cfg[sheet_title] = entry
     workbook_entry: dict[str, object] = {
         "effective_from": effective_from,
@@ -108,7 +104,7 @@ DEFAULT_SHEETS: tuple[SheetSpec, ...] = (
     SheetSpec(
         trade_type="imports",
         rows=(
-            ("period", 1, 6, "string", False, "YYYYMM", "yyyymm_to_date"),
+            ("period", 1, 6, "date", False, "YYYYMM", "yyyymm_to_date"),
             ("hs_code", 7, 10, "string", False, "HTS code", None),
             ("country_coo", 17, 3, "string", False, "country of origin", None),
             ("district_entry", 20, 4, "string", True, "port district", None),
@@ -119,7 +115,7 @@ DEFAULT_SHEETS: tuple[SheetSpec, ...] = (
     SheetSpec(
         trade_type="exports_us",
         rows=(
-            ("period", 1, 6, "string", False, "YYYYMM", "yyyymm_to_date"),
+            ("period", 1, 6, "date", False, "YYYYMM", "yyyymm_to_date"),
             ("schedule_b", 7, 10, "string", False, "Schedule B code", None),
             ("country_dest", 17, 3, "string", False, "destination country", None),
             ("value_fas", 20, 15, "int", False, "F.A.S. value", None),
@@ -129,7 +125,7 @@ DEFAULT_SHEETS: tuple[SheetSpec, ...] = (
     SheetSpec(
         trade_type="exports_nonus",
         rows=(
-            ("period", 1, 6, "string", False, "YYYYMM", "yyyymm_to_date"),
+            ("period", 1, 6, "date", False, "YYYYMM", "yyyymm_to_date"),
             ("hs_code", 7, 10, "string", False, "HS code", None),
             ("country_dest", 17, 3, "string", False, "destination", None),
             ("value_usd", 20, 15, "float", True, "declared value", None),
@@ -209,7 +205,12 @@ def _render_value(col: Column, rng: random.Random, row_idx: int) -> str:
     if col.dtype == "Float64":
         return f"{_gen_float(col, rng, row_idx):.2f}"
     if col.dtype == "Date":
-        return "20240101"
+        year = rng.choice([2023, 2024, 2025])
+        month = rng.randint(1, 12)
+        if col.parse == "yyyymm_to_date":
+            return f"{year}{month:02d}"
+        day = rng.randint(1, 28)
+        return f"{year}{month:02d}{day:02d}"
     raise ValueError(f"unhandled dtype {col.dtype!r}")
 
 

@@ -22,12 +22,12 @@ Project tooling is `uv` on Python 3.12+.
 
 Runtime pipeline (`src/microtrade/`):
 
-- `config.py` — loads the project config (`microtrade.yaml` by default) listing each workbook, its `effective_from`/`effective_to` window, `workbook_id`, and per-sheet `filename_pattern`. Only consulted by `import-spec`; never at ingest time.
+- `config.py` — loads the project config (`microtrade.yaml` by default) listing each workbook, its `effective_from`/`effective_to` window, `workbook_id`, and per-sheet `filename_pattern` + `routing_column`. Only consulted by `import-spec`; never at ingest time.
 - `discover.py` — scan input dir, match each file against every committed spec's `filename_pattern`, route to the matching Spec. Ambiguous matches (one file matching multiple specs) raise; flags `N`/`C` dedupe in favor of `N`.
 - `schema.py` — load versioned YAML specs from `<spec_dir>/<type>/v<effective>.yaml`; `resolve(trade_type, period)` picks the spec whose `[effective_from, effective_to]` window contains `period` (latest effective_from wins on ties).
 - `excel_spec.py` — one-shot converter: Excel workbook → one YAML spec per configured sheet. Never called on the hot path; driven by `microtrade import-spec PATH.xlsx --config microtrade.yaml`. Reads only the sheets the config names and bakes the config's period window + `filename_pattern` into each Spec.
 - `ingest.py` — streams FWF from the zip via `zipfile.ZipFile.open()` (no extraction), slices lines by `(start, length)`, casts to spec dtypes, yields `pyarrow.RecordBatch`es in `chunk_rows` batches.
-- `write.py` — `PartitionWriter` opens `pyarrow.parquet.ParquetWriter` on `year=YYYY/month=MM/part-0.parquet.tmp`, flushes batches one row-group at a time, then atomic-renames on success (idempotent + crash-safe).
+- `write.py` — `PartitionWriter` opens `pyarrow.parquet.ParquetWriter` on `year=YYYY/month=MM/part-0.parquet.tmp`, flushes batches one row-group at a time, then atomic-renames on success (idempotent + crash-safe). `MultiPartitionWriter` routes each row to its partition by reading the spec's declared `routing_column` (a Date column — upstream schemas call this `period`, `year_month`, etc.).
 - `pipeline.py` — orchestrates discover → schema → ingest → write, appending a per-run JSONL manifest under `output/_manifests/<trade_type>/` (kept outside the dataset root so `pl.scan_parquet(..., hive_partitioning=True)` doesn't trip on non-parquet siblings).
 - `cli.py` — Typer app: `ingest`, `import-spec`, `validate-specs`, `inspect`, `version`.
 

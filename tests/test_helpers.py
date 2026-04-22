@@ -71,18 +71,25 @@ def test_render_fwf_lines_honors_record_length_gaps() -> None:
         effective_from="2024-01",
         record_length=20,
         columns=(
-            Column(physical_name="a", start=1, length=5, dtype="Utf8"),
-            # bytes 6-7 are a Blank-style filler gap
+            Column(
+                physical_name="a",
+                start=1,
+                length=6,
+                dtype="Date",
+                parse="yyyymm_to_date",
+            ),
+            # bytes 7 is a Blank-style filler gap
             Column(physical_name="b", start=8, length=5, dtype="Utf8"),
             # bytes 13-20 are a trailing filler gap
         ),
+        routing_column="a",
     )
 
     lines = render_fwf_lines(spec, n_rows=3, seed=0)
     assert len(lines) == 3
     for line in lines:
         assert len(line) == spec.record_length
-        assert line[5:7] == "  "  # inter-column gap
+        assert line[6:7] == " "  # inter-column gap (byte 7)
         assert line[12:20] == " " * 8  # trailing gap
 
 

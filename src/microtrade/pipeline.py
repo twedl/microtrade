@@ -44,7 +44,6 @@ from microtrade.ingest import (
     skip_rate_error,
 )
 from microtrade.schema import (
-    ROUTING_COLUMN,
     TRADE_TYPES,
     CanonicalColumn,
     Spec,
@@ -236,6 +235,7 @@ def _process_one(
         dataset_root=config.output_dir,
         trade_type=raw.trade_type,
         arrow_schema=build_arrow_schema(spec),
+        routing_column=spec.routing_column,
         compression=config.compression,
     )
     with _QualityIssueWriter(
@@ -251,7 +251,7 @@ def _process_one(
                     on_quality_issue=issue_sink,
                     max_skip_rate=config.max_skip_rate,
                 ):
-                    filtered = _route_rows(batch, raw, issue_sink)
+                    filtered = _route_rows(batch, raw, spec.routing_column, issue_sink)
                     if filtered.num_rows > 0:
                         w.write_batch(filtered)
                     # Per-batch check catches the route_rows rejection path
@@ -305,15 +305,18 @@ def _process_one(
 
 
 def _route_rows(
-    batch: pa.RecordBatch, raw: RawInput, issue_sink: _QualityIssueWriter
+    batch: pa.RecordBatch,
+    raw: RawInput,
+    routing_column: str,
+    issue_sink: _QualityIssueWriter,
 ) -> pa.RecordBatch:
-    """Filter rows to those whose `period` falls inside the snapshot's window.
+    """Filter rows to those whose routing column falls inside the snapshot's window.
 
-    Out-of-window or null `period` values route to the quality log. The
-    happy-path mask is vectorized; only rejected rows are iterated in
-    Python to format per-row log entries.
+    Out-of-window or null values route to the quality log. The happy-path
+    mask is vectorized; only rejected rows are iterated in Python to
+    format per-row log entries.
     """
-    period = batch.column(ROUTING_COLUMN)
+    period = batch.column(routing_column)
     valid = pc.is_valid(period)
     year_arr = pc.year(period)
     month_arr = pc.month(period)
@@ -345,7 +348,7 @@ def _route_rows(
             QualityIssue(
                 file=raw.path.name,
                 line_no=i + 1,
-                column=ROUTING_COLUMN,
+                column=routing_column,
                 error=error,
                 raw_line="",
             )

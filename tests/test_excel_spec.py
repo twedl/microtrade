@@ -59,7 +59,7 @@ def test_read_workbook_produces_spec_per_trade_type(
     assert imports.derived == (("year", "year(period)"), ("month", "month(period)"))
 
     exports_nonus = specs["exports_nonus"]
-    assert [c.dtype for c in exports_nonus.columns] == ["Utf8", "Utf8", "Utf8", "Float64"]
+    assert [c.dtype for c in exports_nonus.columns] == ["Date", "Utf8", "Utf8", "Float64"]
 
 
 def test_read_workbook_rejects_missing_sheet(tmp_path: Path) -> None:
@@ -90,12 +90,12 @@ def test_read_workbook_skips_blank_filler_rows(tmp_path: Path) -> None:
     wb.remove(wb.active)
     sheet_title = "ImportsSheet"
     ws = wb.create_sheet(sheet_title)
-    ws.append(["layout imports", None, None, None])
-    ws.append(["Position", "Description", "Length", "Type"])
-    ws.append([1, "code", 5, "Char"])
-    ws.append([6, "Blank", 1, "Char"])  # filler
-    ws.append([7, "value", 10, "Num"])
-    ws.append([17, "Blank", 3, "Char"])  # trailing filler extends record_length
+    ws.append(["layout imports", None, None, None, None, None])
+    ws.append(["Position", "Description", "Length", "Type", "Nullable", "Parse"])
+    ws.append([1, "period", 6, "Date", "n", "yyyymm_to_date"])
+    ws.append([7, "Blank", 1, "Char", None, None])  # filler
+    ws.append([8, "value", 10, "Num", None, None])
+    ws.append([18, "Blank", 3, "Char", None, None])  # trailing filler extends record_length
     wb_path = tmp_path / "wb.xlsx"
     wb.save(wb_path)
 
@@ -109,9 +109,9 @@ def test_read_workbook_skips_blank_filler_rows(tmp_path: Path) -> None:
 
     specs = read_workbook(wb_path, workbook_config)
     imports = specs["imports"]
-    assert [c.physical_name for c in imports.columns] == ["code", "value"]
-    assert [c.dtype for c in imports.columns] == ["Utf8", "Int64"]
-    assert imports.record_length == 19
+    assert [c.physical_name for c in imports.columns] == ["period", "value"]
+    assert [c.dtype for c in imports.columns] == ["Date", "Int64"]
+    assert imports.record_length == 20
 
 
 def test_read_workbook_honors_position_only_sentinel_row(tmp_path: Path) -> None:
@@ -124,13 +124,13 @@ def test_read_workbook_honors_position_only_sentinel_row(tmp_path: Path) -> None
     wb.remove(wb.active)
     sheet_title = "ImportsSheet"
     ws = wb.create_sheet(sheet_title)
-    ws.append(["Position", "Description", "Length", "Type"])
-    ws.append([1, "code", 5, "Char"])
-    ws.append([6, "value", 10, "Num"])
-    # Rightmost real column ends at byte 15; sentinel says the record actually
-    # extends to byte 16 (an upstream trailing-space filler the workbook
+    ws.append(["Position", "Description", "Length", "Type", "Nullable", "Parse"])
+    ws.append([1, "period", 6, "Date", "n", "yyyymm_to_date"])
+    ws.append([7, "value", 10, "Num", None, None])
+    # Rightmost real column ends at byte 16; sentinel says the record actually
+    # extends to byte 17 (an upstream trailing-space filler the workbook
     # declares via a position-only row).
-    ws.append([16, None, None, None])
+    ws.append([17, None, None, None, None, None])
     wb_path = tmp_path / "wb.xlsx"
     wb.save(wb_path)
 
@@ -144,8 +144,8 @@ def test_read_workbook_honors_position_only_sentinel_row(tmp_path: Path) -> None
 
     specs = read_workbook(wb_path, workbook_config)
     imports = specs["imports"]
-    assert [c.physical_name for c in imports.columns] == ["code", "value"]
-    assert imports.record_length == 16
+    assert [c.physical_name for c in imports.columns] == ["period", "value"]
+    assert imports.record_length == 17
 
 
 def test_read_workbook_applies_rename_from_config(schema_workbook: Path, tmp_path: Path) -> None:
