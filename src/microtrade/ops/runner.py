@@ -10,11 +10,19 @@ manifests on success, so a failed year self-heals on the next run.
 test suite replaces via ``monkeypatch.setattr`` (see
 ``tests/ops/test_runner.py``) — no adapter class, no dependency
 injection ceremony at the call site.
+
+Transport (``mirror_upstream_raw`` / ``pull_raw`` / ``push_processed``)
+is different: it's environment-specific, not test-only. ``run()``
+accepts ``mirror=`` / ``pull=`` / ``push=`` keyword overrides so
+production entrypoints can supply their own implementations without
+monkeypatching module globals. Defaults point at the stubs in
+``microtrade.ops.transport``.
 """
 
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -34,6 +42,9 @@ from microtrade.ops.transport import mirror_upstream_raw, pull_raw, push_process
 from microtrade.pipeline import PipelineConfig, RunSummary
 from microtrade.pipeline import run as _mt_run
 from microtrade.schema import file_sha256
+
+TransportFn = Callable[[Settings], None]
+PushFn = Callable[[Settings, list[Path]], None]
 
 
 def import_spec(workbook: Path, microtrade_yaml: Path, specs_out: Path) -> list[Path]:
@@ -101,7 +112,7 @@ def _run_stage1(settings: Settings, mt_hash: str) -> int:
     return failures
 
 
-def _run_stage2(settings: Settings, cfg: ProjectConfig, mt_hash: str) -> int:
+def _run_stage2(settings: Settings, cfg: ProjectConfig, mt_hash: str, push: PushFn) -> int:
     dirty = plan_stage2(settings, cfg, microtrade_hash=mt_hash)
     if not dirty:
         logger.info("stage 2: nothing to do")
@@ -122,7 +133,7 @@ def _run_stage2(settings: Settings, cfg: ProjectConfig, mt_hash: str) -> int:
                     f"microtrade reported {summary.failed_count} partition failure(s)"
                 )
 
-            push_processed(settings, [_year_output_dir(settings, key)])
+            push(settings, [_year_output_dir(settings, key)])
 
             now = datetime.now(tz=UTC)
             for raw in raws:
@@ -145,15 +156,38 @@ def _run_stage2(settings: Settings, cfg: ProjectConfig, mt_hash: str) -> int:
     return failures
 
 
-def run(settings: Settings) -> int:
-    mirror_upstream_raw(settings)
-    pull_raw(settings)
+def run(
+    settings: Settings,
+    *,
+    mirror: TransportFn | None = None,
+    pull: TransportFn | None = None,
+    push: PushFn | None = None,
+) -> int:
+    """Drive one ops cycle.
+
+    ``mirror`` / ``pull`` / ``push`` default to the stubs in
+    ``microtrade.ops.transport``. Production callers supply their own:
+
+        from microtrade.ops.runner import run
+        from my_app.transport import mirror, pull, push
+        sys.exit(run(settings, mirror=mirror, pull=pull, push=push))
+
+    Defaults are resolved at call time (not at function-def time), so
+    ``monkeypatch.setattr("microtrade.ops.runner.mirror_upstream_raw",
+    ...)`` still works in tests that don't override via kwargs.
+    """
+    mirror_fn = mirror if mirror is not None else mirror_upstream_raw
+    pull_fn = pull if pull is not None else pull_raw
+    push_fn = push if push is not None else push_processed
+
+    mirror_fn(settings)
+    pull_fn(settings)
 
     mt_hash = file_sha256(settings.microtrade_yaml)
     stage1_failures = _run_stage1(settings, mt_hash)
 
     cfg = mt_config.load_config(settings.microtrade_yaml)
-    stage2_failures = _run_stage2(settings, cfg, mt_hash)
+    stage2_failures = _run_stage2(settings, cfg, mt_hash, push_fn)
 
     total = stage1_failures + stage2_failures
     if total:

@@ -295,11 +295,23 @@ non-zero if any year or workbook failed; the failed items simply have
 no manifest update, so the next cronjob run replans them automatically.
 `loguru` handles logging (no custom sinks).
 
-A `transport` seam (`microtrade.ops.transport`) wraps the
-`mirror_upstream_raw → pull_raw → stage1 → stage2 (push_processed per
-year)` ordering contract; the three backend functions are stubs today
-so you can plug in rsync / s3 / mounted-PV / `kubectl cp` without
-touching the rest of the pipeline.
+A `transport` seam wraps the `mirror_upstream_raw → pull_raw → stage1 →
+stage2 (push_processed per year)` ordering contract. The default
+backends in `microtrade.ops.transport` are `pass`-body stubs; your
+deployment supplies real ones as kwargs to `run()`:
+
+```python
+from microtrade.ops.runner import run
+from microtrade.ops.settings import load_settings
+from my_app.transport import mirror, pull, push
+
+sys.exit(run(load_settings(Path("config.yaml")),
+             mirror=mirror, pull=pull, push=push))
+```
+
+Point your k8s CronJob's `command` at this wrapper instead of
+`microtrade ops run` when you need custom transport. See
+`examples/ops_demo.py` for a runnable walkthrough.
 
 See `CLAUDE.md` for the full list of invariants (dirty-check logic,
 manifest schemas, k8s deployment guidance, what the ops layer

@@ -187,3 +187,25 @@ def test_default_adapter_raises(tree, transport_spy):
     settings, root = tree
     (root / "workbooks" / "wb2020.xls").write_bytes(b"wb")
     assert run(settings) == 1
+
+
+def test_transport_kwargs_override_defaults(tree, install_adapter):
+    """Passing mirror/pull/push directly bypasses the module-level stubs."""
+    settings, root = tree
+    (root / "workbooks" / "wb2020.xls").write_bytes(b"wb")
+    (root / "raw" / "S1_202001N.TXT.zip").write_bytes(b"raw")
+
+    install_adapter(FakeAdapter())
+    calls: dict[str, list] = {"mirror": [], "pull": [], "push": []}
+    assert (
+        run(
+            settings,
+            mirror=lambda s: calls["mirror"].append(s),
+            pull=lambda s: calls["pull"].append(s),
+            push=lambda s, dirs: calls["push"].append(list(dirs)),
+        )
+        == 0
+    )
+    assert len(calls["mirror"]) == 1
+    assert len(calls["pull"]) == 1
+    assert len(calls["push"]) == 1  # one dirty year

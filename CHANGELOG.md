@@ -6,6 +6,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `microtrade.ops.runner.run` now accepts `mirror=`, `pull=`, and
+  `push=` keyword arguments so production callers can supply
+  environment-specific transport functions without monkeypatching
+  module globals. Defaults still resolve to the stubs in
+  `microtrade.ops.transport` at call time, so existing
+  `monkeypatch.setattr(...)` test hooks keep working. Added
+  `examples/ops_demo.py` as a runnable template.
+
 ## [0.2.5] - 2026-04-23
 
 ### Added
