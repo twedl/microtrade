@@ -280,8 +280,10 @@ specs_dir:          /data/specs
 processed_dir:      /data/processed
 spec_manifests_dir: /data/manifests/specs
 raw_manifests_dir:  /data/manifests/raw
-upstream_raw_dir:   /mnt/upstream/raw   # where the provider drops files
-raw_remote_dir:     /mnt/remote/raw     # our durable archive
+upstream_raw_dir:     /mnt/upstream/raw     # where the provider drops files
+raw_remote_dir:       /mnt/remote/raw       # our durable archive
+processed_remote_dir: /mnt/remote/processed # remote Parquet destination
+manifests_remote_dir: /mnt/remote/manifests # shared dirty-check state
 ```
 
 Run:
@@ -312,25 +314,27 @@ pull_manifests → mirror → pull → stage 1 → stage 2 (push per year) → p
 so a pod that doesn't have the previous run's PV still skips already-
 done work. `push_manifests` publishes the updated state at the end of
 the run (even if some years failed — partial progress is worth
-sharing). The default backends in `microtrade.ops.transport` are
-`pass`-body stubs; your deployment supplies real ones as kwargs to
-`run()`:
+sharing). Path routing is owned by the library and driven by
+`config.yaml`; only the per-file transfer primitive is injectable:
 
 ```python
 from microtrade.ops.runner import run
 from microtrade.ops.settings import load_settings
-from my_app.transport import pull_manifests, mirror, pull, push, push_manifests
 
+# Default: shutil.copy2 (local disk / mounted PV). No kwarg needed.
+sys.exit(run(load_settings(Path("config.yaml"))))
+
+# Or swap in your own one-file-at-a-time primitive (kubectl cp,
+# S3 put_object, etc.). It MUST preserve mtime or the skip-if-
+# unchanged check misfires and every file re-copies next run.
 sys.exit(run(
     load_settings(Path("config.yaml")),
-    pull_manifests_fn=pull_manifests,
-    mirror=mirror, pull=pull, push=push,
-    push_manifests_fn=push_manifests,
+    copy_file=my_kubectl_cp_wrapper,
 ))
 ```
 
 Point your k8s CronJob's `command` at this wrapper instead of
-`microtrade ops run` when you need custom transport. See
+`microtrade ops run` when you need a custom copy primitive. See
 `examples/ops_demo.py` for a runnable walkthrough.
 
 See `CLAUDE.md` for the full list of invariants (dirty-check logic,

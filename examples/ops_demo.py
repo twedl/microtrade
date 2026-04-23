@@ -6,24 +6,23 @@ Run from a project directory that contains `config.yaml` and the
 
     uv run python path/to/ops_demo.py
 
-Demonstrates three things:
+Demonstrates:
 
   1. Loading the ops Settings from a cwd-relative ``config.yaml``.
   2. Calling ``microtrade.ops.runner.run`` directly — same API the CLI
      (``microtrade ops run``) uses under the hood.
-  3. Supplying all five environment-specific transport functions as
-     kwargs to ``run()`` — ``pull_manifests`` / ``mirror`` / ``pull`` /
-     ``push`` / ``push_manifests``. The defaults are the ``pass``-body
-     stubs in ``microtrade.ops.transport``; overriding them is how you
-     plug in rsync, s3, mounted-PV, ``kubectl cp``, etc. without
-     touching the library. The manifest hooks let multiple operators
-     share dirty-check state so nobody sees "everything dirty" just
-     because they don't have the other's PV.
+  3. (Optional) overriding the per-file transfer primitive via the
+     ``copy_file`` kwarg on ``run()``. The default is a thin
+     ``shutil.copy2`` wrapper (local disk / mounted PV). Deployments
+     that need something different (``kubectl cp``, S3 ``put_object``,
+     …) plug it in here. This demo sticks with the default, so it
+     works on any machine without rsync / aws cli / kubectl installed.
 
-This demo uses ``microtrade.ops.transport.sync_tree`` (pure-Python,
-stdlib-only, skips unchanged files by size+mtime) for every hook, so
-it works on any machine without rsync installed. Real deployments
-typically swap in rsync, ``aws s3 sync``, ``kubectl cp``, etc.
+The library owns all path routing: ``mirror_upstream_raw`` /
+``pull_raw`` / ``push_processed`` / ``pull_manifests`` /
+``push_manifests`` are real implementations in
+``microtrade.ops.transport``, not stubs. Your ``config.yaml`` picks
+the paths; ``copy_file`` picks the primitive.
 """
 
 from __future__ import annotations
@@ -33,53 +32,6 @@ from pathlib import Path
 
 from microtrade.ops.runner import run
 from microtrade.ops.settings import Settings, load_settings
-from microtrade.ops.transport import sync_tree
-
-# Backends for the five transport hooks. Uses microtrade.ops.transport.sync_tree
-# (pure-Python, stdlib-only, rsync-like skip-if-unchanged) so the demo runs on
-# any box. Swap sync_tree for rsync / aws s3 sync / kubectl cp / etc. in your
-# real deployment.
-#
-# Manifests live under their own remote root so two operators running from
-# different machines converge on the same dirty-check state.
-
-
-def pull_manifests(settings: Settings) -> None:
-    remote = _manifests_remote_root(settings)
-    sync_tree(remote / "specs", settings.spec_manifests_dir)
-    sync_tree(remote / "raw", settings.raw_manifests_dir)
-
-
-def mirror(settings: Settings) -> None:
-    sync_tree(settings.upstream_raw_dir, settings.raw_remote_dir / "current")
-
-
-def pull(settings: Settings) -> None:
-    # Upstream drops workbooks (.xls/.xlsx) and raw zips (.zip) into one
-    # directory. Split by extension on the way down so stage 1 reads
-    # workbooks_dir and stage 2 reads raw_dir without stepping on each other.
-    src = settings.raw_remote_dir / "current"
-    sync_tree(src, settings.raw_dir, patterns=["*.zip"])
-    sync_tree(src, settings.workbooks_dir, patterns=["*.xls", "*.xlsx"])
-
-
-def push(settings: Settings, paths: list[Path]) -> None:
-    remote = settings.raw_remote_dir.parent / "processed"
-    for p in paths:
-        sync_tree(p, remote / p.relative_to(settings.processed_dir))
-
-
-def push_manifests(settings: Settings) -> None:
-    remote = _manifests_remote_root(settings)
-    sync_tree(settings.spec_manifests_dir, remote / "specs")
-    sync_tree(settings.raw_manifests_dir, remote / "raw")
-
-
-def _manifests_remote_root(settings: Settings) -> Path:
-    return settings.raw_remote_dir.parent / "manifests"
-
-
-# --- 2. Entry point -------------------------------------------------------
 
 
 def main() -> None:
@@ -92,20 +44,12 @@ def main() -> None:
     settings = load_settings(config_path)
     _summarize(settings)
 
-    transport_kwargs = {
-        "pull_manifests_fn": pull_manifests,
-        "mirror": mirror,
-        "pull": pull,
-        "push": push,
-        "push_manifests_fn": push_manifests,
-    }
-
     print("\n=== run #1 ===")
-    rc1 = run(settings, **transport_kwargs)
+    rc1 = run(settings)
     print(f"exit code: {rc1}")
 
     print("\n=== run #2 (expect 'stage 1/2: nothing to do' if inputs didn't change) ===")
-    rc2 = run(settings, **transport_kwargs)
+    rc2 = run(settings)
     print(f"exit code: {rc2}")
 
     sys.exit(rc1 or rc2)

@@ -131,6 +131,8 @@ spec_manifests_dir: state dir for stage 1
 raw_manifests_dir: state dir for stage 2 (one JSON per raw file)
 upstream_raw_dir: remote source (provider drops here, periodically deletes)
 raw_remote_dir: our permanent archive (mirror of upstream + version history)
+processed_remote_dir: remote destination for processed Parquet output
+manifests_remote_dir: remote shared root for spec + raw manifests
 ```
 
 ## State tracking
@@ -252,8 +254,8 @@ site.
 
 ## Transport seam
 
-`microtrade.ops.transport` exports five stub functions that frame the
-ordering contract in `run()`:
+`microtrade.ops.transport` exports five real (not stub) hook
+functions that frame the ordering contract in `run()`:
 
 ```
 pull_manifests -> mirror_upstream_raw -> pull_raw -> stage 1
@@ -269,15 +271,29 @@ partial progress is still worth sharing.
 
 `mirror` before `pull` (upstream deletes periodically). `push` is
 per-year (not once at the end) so a failed year does not block
-successful years from reaching the remote.
+successful years from reaching the remote. `pull_raw` splits the
+upstream drop by extension: `*.zip` -> `raw_dir` (stage 2 input),
+`*.xls` / `*.xlsx` -> `workbooks_dir` (stage 1 input).
 
-Production callers override each hook via kwargs on `run()`
-(`pull_manifests_fn=`, `mirror=`, `pull=`, `push=`,
-`push_manifests_fn=`); defaults resolve at call time to the
-module-level stubs, so `monkeypatch.setattr(...)` still works in
-tests. The whole ordering is pinned by
-`test_transport_kwargs_override_defaults` in
-`tests/ops/test_runner.py`.
+**Path routing is baked into the library; only the per-file transfer
+primitive is DI.** `run()` accepts a single `copy_file` kwarg, a
+`Callable[[Path, Path], None]` that moves one file from src to dst
+preserving mtime. The default is a thin `shutil.copy2` wrapper
+(stdlib-only, good for local disk / mounted PV). The target
+deployment has no `rsync`, no `aws s3 sync`, no `kubectl cp -r`, no
+bulk-tree primitive at all — what's available is some way to move
+one file at a time (per-file `kubectl cp`, S3 `put_object`, etc.),
+which slots in as the `copy_file` kwarg. `microtrade.ops.transport.sync_tree`
+owns the tree walk, skip-if-unchanged (size + truncated mtime), and
+atomic publish (`target.tmp` + `os.replace`); every hook calls it
+and threads `copy_file` through.
+
+Contract: `copy_file` must preserve mtime, otherwise every
+subsequent run re-copies everything because the skip check
+misfires. Path layout comes from `Settings` (and thus from
+`config.yaml`) — `upstream_raw_dir`, `raw_remote_dir`,
+`processed_remote_dir`, `manifests_remote_dir`. Change where things
+land by editing config, not by overriding hooks.
 
 ## Pipeline entry point
 

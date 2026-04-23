@@ -6,6 +6,38 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.9] - 2026-04-23
+
+### Breaking
+
+- `microtrade.ops.runner.run` no longer accepts `pull_manifests_fn=`,
+  `mirror=`, `pull=`, `push=`, or `push_manifests_fn=`. Path routing
+  is now owned by the library; `microtrade.ops.transport` ships real
+  implementations of all five hooks (no more `pass`-body stubs) that
+  call `sync_tree` under a single injected per-file primitive.
+- `Settings` requires two new fields in `config.yaml`:
+  `processed_remote_dir` (remote destination for processed Parquet)
+  and `manifests_remote_dir` (shared dirty-check state). Add both
+  to your `config.yaml` before upgrading.
+- `pull_raw` now always splits the upstream drop by extension:
+  `*.zip` → `raw_dir`, `*.xls` / `*.xlsx` → `workbooks_dir`.
+  Previously the split was a demo-level concern in `ops_demo.py`.
+
+### Added
+
+- `microtrade.ops.runner.run` accepts a single `copy_file` kwarg —
+  a `Callable[[Path, Path], None]` that moves one file from src to
+  dst. Threaded through every transport hook and through
+  `sync_tree`. Default is a thin `shutil.copy2` wrapper. Swap in a
+  `kubectl cp` / S3 `put_object` / etc. wrapper if the default
+  can't reach your remote. Contract: must preserve mtime, otherwise
+  skip-if-unchanged misfires and every file re-copies next run.
+
+### Changed
+
+- `examples/ops_demo.py` dropped its five hook bodies — running the
+  demo is now `run(settings)`.
+
 ## [0.2.8] - 2026-04-23
 
 ### Added

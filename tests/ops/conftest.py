@@ -47,6 +47,8 @@ spec_manifests_dir: {tmp_path / "manifests" / "specs"}
 raw_manifests_dir: {tmp_path / "manifests" / "raw"}
 upstream_raw_dir: {tmp_path / "upstream"}
 raw_remote_dir: {tmp_path / "remote"}
+processed_remote_dir: {tmp_path / "processed_remote"}
+manifests_remote_dir: {tmp_path / "manifests_remote"}
 """
     )
     return load_settings(cfg_yaml), tmp_path

@@ -31,6 +31,8 @@ class Settings:
     raw_manifests_dir: Path
     upstream_raw_dir: Path
     raw_remote_dir: Path
+    processed_remote_dir: Path
+    manifests_remote_dir: Path
 
 
 def load_settings(yaml_path: Path) -> Settings:

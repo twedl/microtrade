@@ -44,6 +44,29 @@ def test_sync_tree_skips_unchanged_and_overwrites_modified(tmp_path: Path) -> No
     assert (dst / "changed.txt").read_text() == "v2-longer"
 
 
+def test_sync_tree_uses_injected_copy_file(tmp_path: Path) -> None:
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    _write(src / "a.txt", "hello")
+    _write(src / "sub/b.txt", "world")
+
+    calls: list[tuple[Path, Path]] = []
+
+    def fake_copy(s: Path, d: Path) -> None:
+        calls.append((s, d))
+        d.write_text(s.read_text())
+        # Preserve mtime so subsequent runs can skip.
+        st = s.stat()
+        os.utime(d, (st.st_atime, st.st_mtime))
+
+    sync_tree(src, dst, copy_file=fake_copy)
+
+    # Two files copied, each via a .tmp target then os.replace'd into place.
+    assert len(calls) == 2
+    assert all(d.name.endswith(".tmp") for _, d in calls)
+    assert (dst / "a.txt").read_text() == "hello"
+    assert (dst / "sub/b.txt").read_text() == "world"
+
+
 def test_sync_tree_pattern_filters(tmp_path: Path) -> None:
     src, dst = tmp_path / "src", tmp_path / "dst"
     _write(src / "keep.zip", "z")

@@ -14,6 +14,8 @@ spec_manifests_dir: /data/manifests/specs
 raw_manifests_dir: /data/manifests/raw
 upstream_raw_dir: /mnt/upstream/raw
 raw_remote_dir: /mnt/remote/raw
+processed_remote_dir: /mnt/remote/processed
+manifests_remote_dir: /mnt/remote/manifests
 """
 
 

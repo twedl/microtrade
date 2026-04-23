@@ -1,3 +1,4 @@
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -63,33 +64,15 @@ def install_adapter(monkeypatch: pytest.MonkeyPatch):
     return _install
 
 
-@pytest.fixture
-def transport_spy(monkeypatch: pytest.MonkeyPatch):
-    calls: dict[str, list] = {"mirror": [], "pull": [], "push": []}
-    monkeypatch.setattr(
-        "microtrade.ops.runner.mirror_upstream_raw",
-        lambda s: calls["mirror"].append(s),
-    )
-    monkeypatch.setattr("microtrade.ops.runner.pull_raw", lambda s: calls["pull"].append(s))
-    monkeypatch.setattr(
-        "microtrade.ops.runner.push_processed",
-        lambda s, dirs: calls["push"].append(list(dirs)),
-    )
-    return calls
-
-
-def test_empty_run_exits_clean(tree, transport_spy, install_adapter):
+def test_empty_run_exits_clean(tree, install_adapter):
     settings, _root = tree
     adapter = install_adapter(FakeAdapter())
     assert run(settings) == 0
     assert adapter.import_calls == []
     assert adapter.ingest_calls == []
-    assert len(transport_spy["mirror"]) == 1
-    assert len(transport_spy["pull"]) == 1
-    assert transport_spy["push"] == []
 
 
-def test_happy_path(tree, transport_spy, install_adapter):
+def test_happy_path(tree, install_adapter):
     settings, root = tree
     wb = root / "workbooks" / "wb2020.xls"
     wb.write_bytes(b"workbook")
@@ -122,12 +105,15 @@ def test_happy_path(tree, transport_spy, install_adapter):
     assert rm_a.year == "2020"
     assert rm_a.month == "01"
 
-    assert len(transport_spy["mirror"]) == 1
-    assert len(transport_spy["pull"]) == 1
-    assert len(transport_spy["push"]) == 2
+    # push_processed mirrored the per-year output dirs into processed_remote_dir.
+    assert (settings.processed_remote_dir / "imports" / "year=2020").is_dir()
+    assert (settings.processed_remote_dir / "exports_us" / "year=2020").is_dir()
+    # push_manifests mirrored the manifest dirs into manifests_remote_dir.
+    assert (settings.manifests_remote_dir / "specs" / "wb2020.xls.json").is_file()
+    assert (settings.manifests_remote_dir / "raw" / f"{raw_a.name}.json").is_file()
 
 
-def test_rerun_is_noop(tree, transport_spy, install_adapter):
+def test_rerun_is_noop(tree, install_adapter):
     settings, root = tree
     (root / "workbooks" / "wb2020.xls").write_bytes(b"wb")
     (root / "raw" / "S1_202001N.TXT.zip").write_bytes(b"raw")
@@ -143,7 +129,7 @@ def test_rerun_is_noop(tree, transport_spy, install_adapter):
     assert a2.ingest_calls == []
 
 
-def test_year_failure_isolated_nonzero_exit(tree, transport_spy, install_adapter):
+def test_year_failure_isolated_nonzero_exit(tree, install_adapter):
     settings, root = tree
     (root / "workbooks" / "wb2020.xls").write_bytes(b"wb")
     good = root / "raw" / "S1_202001N.TXT.zip"
@@ -156,10 +142,12 @@ def test_year_failure_isolated_nonzero_exit(tree, transport_spy, install_adapter
 
     assert read_manifest(settings.raw_manifests_dir, good.name, RawManifest) is not None
     assert read_manifest(settings.raw_manifests_dir, bad.name, RawManifest) is None
-    assert len(transport_spy["push"]) == 1
+    # Good year published; bad year did not.
+    assert (settings.processed_remote_dir / "imports" / "year=2020").is_dir()
+    assert not (settings.processed_remote_dir / "exports_us" / "year=2020").exists()
 
 
-def test_stage1_failure_isolated_nonzero_exit(tree, transport_spy, install_adapter):
+def test_stage1_failure_isolated_nonzero_exit(tree, install_adapter):
     settings, root = tree
     good_wb = root / "workbooks" / "good.xls"
     bad_wb = root / "workbooks" / "bad.xls"
@@ -173,7 +161,7 @@ def test_stage1_failure_isolated_nonzero_exit(tree, transport_spy, install_adapt
     assert read_manifest(settings.spec_manifests_dir, bad_wb.name, SpecManifest) is None
 
 
-def test_microtrade_failed_count_triggers_year_failure(tree, transport_spy, install_adapter):
+def test_microtrade_failed_count_triggers_year_failure(tree, install_adapter):
     settings, root = tree
     (root / "raw" / "S1_202001N.TXT.zip").write_bytes(b"raw")
 
@@ -182,54 +170,47 @@ def test_microtrade_failed_count_triggers_year_failure(tree, transport_spy, inst
     assert read_manifest(settings.raw_manifests_dir, "S1_202001N.TXT.zip", RawManifest) is None
 
 
-def test_default_adapter_raises(tree, transport_spy):
+def test_default_adapter_raises(tree):
     """Without fakes installed, the real import_spec fails on a stub workbook."""
     settings, root = tree
     (root / "workbooks" / "wb2020.xls").write_bytes(b"wb")
     assert run(settings) == 1
 
 
-def test_transport_kwargs_override_defaults(tree, install_adapter):
-    """Passing transport fns directly bypasses the module-level stubs,
-    and the full ordering (pull_manifests before stage 1, push_manifests
-    after stage 2) is honoured."""
+def test_copy_file_is_used_by_every_hook(tree, install_adapter):
+    """A custom copy_file is threaded through pull_manifests, mirror_upstream_raw,
+    pull_raw, push_processed, and push_manifests."""
     settings, root = tree
     (root / "workbooks" / "wb2020.xls").write_bytes(b"wb")
     (root / "raw" / "S1_202001N.TXT.zip").write_bytes(b"raw")
 
+    # Populate the remote so pull_manifests, mirror, and pull all have work.
+    upstream_zip = settings.upstream_raw_dir / "S1_202001N.TXT.zip"
+    upstream_zip.parent.mkdir(parents=True, exist_ok=True)
+    upstream_zip.write_bytes(b"upstream-z")
+    seeded_manifest = settings.manifests_remote_dir / "raw" / "seed.json"
+    seeded_manifest.parent.mkdir(parents=True, exist_ok=True)
+    seeded_manifest.write_text("{}")
+
     install_adapter(FakeAdapter())
-    order: list[str] = []
-    calls: dict[str, list] = {
-        "pull_manifests": [],
-        "mirror": [],
-        "pull": [],
-        "push": [],
-        "push_manifests": [],
-    }
 
-    def record(name: str):
-        def fn(*args):
-            calls[name].append(args)
-            order.append(name)
+    calls: list[tuple[Path, Path]] = []
 
-        return fn
+    def spy(src: Path, dst: Path) -> None:
+        calls.append((src, dst))
+        shutil.copy2(src, dst)
 
-    assert (
-        run(
-            settings,
-            pull_manifests_fn=record("pull_manifests"),
-            mirror=record("mirror"),
-            pull=record("pull"),
-            push=record("push"),
-            push_manifests_fn=record("push_manifests"),
-        )
-        == 0
-    )
-    assert len(calls["pull_manifests"]) == 1
-    assert len(calls["mirror"]) == 1
-    assert len(calls["pull"]) == 1
-    assert len(calls["push"]) == 1  # one dirty year
-    assert len(calls["push_manifests"]) == 1
-    # Ordering: pull_manifests first, push_manifests last.
-    assert order[0] == "pull_manifests"
-    assert order[-1] == "push_manifests"
+    assert run(settings, copy_file=spy) == 0
+
+    # Every copy target is a .tmp sibling (sync_tree's atomicity discipline).
+    assert calls, "expected copy_file to be invoked at least once"
+    assert all(d.name.endswith(".tmp") for _, d in calls)
+
+    # Every hook that has work to do went through the spy. Checked by
+    # destinations the copy targets land under.
+    dsts = [d for _, d in calls]
+    assert any(settings.raw_remote_dir / "current" in d.parents for d in dsts)  # mirror
+    assert any(settings.raw_dir in d.parents for d in dsts)  # pull_raw (zip split)
+    assert any(settings.processed_remote_dir in d.parents for d in dsts)  # push_processed
+    assert any(settings.manifests_remote_dir in d.parents for d in dsts)  # push_manifests
+    assert any(settings.raw_manifests_dir in d.parents for d in dsts)  # pull_manifests

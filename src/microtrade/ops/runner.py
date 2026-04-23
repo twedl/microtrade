@@ -1,28 +1,27 @@
 """Cron-driven orchestration over microtrade's ingest pipeline.
 
 A single ``run(settings)`` call drives the ordering:
-``mirror_upstream_raw -> pull_raw -> stage 1 -> stage 2 (push_processed per
-year)``. Stage 1 regenerates spec YAMLs for dirty workbooks; stage 2
-ingests each dirty ``(trade_type, year)`` and only records its raw
-manifests on success, so a failed year self-heals on the next run.
+``pull_manifests -> mirror_upstream_raw -> pull_raw -> stage 1 -> stage 2
+(push_processed per year) -> push_manifests``. Stage 1 regenerates spec
+YAMLs for dirty workbooks; stage 2 ingests each dirty
+``(trade_type, year)`` and only records its raw manifests on success,
+so a failed year self-heals on the next run.
 
 ``import_spec`` and ``ingest_year`` are module-level functions that the
 test suite replaces via ``monkeypatch.setattr`` (see
 ``tests/ops/test_runner.py``) — no adapter class, no dependency
 injection ceremony at the call site.
 
-Transport (``mirror_upstream_raw`` / ``pull_raw`` / ``push_processed``)
-is different: it's environment-specific, not test-only. ``run()``
-accepts ``mirror=`` / ``pull=`` / ``push=`` keyword overrides so
-production entrypoints can supply their own implementations without
-monkeypatching module globals. Defaults point at the stubs in
-``microtrade.ops.transport``.
+Transport is environment-specific. ``run()`` accepts a single
+``copy_file`` kwarg — the per-file transfer primitive — which threads
+through every hook in ``microtrade.ops.transport`` and through
+``sync_tree``. The library owns path routing and tree-walk / atomic
+publish; the caller only supplies "how to move one file".
 """
 
 from __future__ import annotations
 
 import sys
-from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -39,6 +38,8 @@ from microtrade.ops.manifest import (
 from microtrade.ops.planner import YearKey, match_raw, plan_stage1, plan_stage2
 from microtrade.ops.settings import Settings, load_settings
 from microtrade.ops.transport import (
+    CopyFn,
+    _shutil_copy2,
     mirror_upstream_raw,
     pull_manifests,
     pull_raw,
@@ -48,9 +49,6 @@ from microtrade.ops.transport import (
 from microtrade.pipeline import PipelineConfig, RunSummary
 from microtrade.pipeline import run as _mt_run
 from microtrade.schema import file_sha256
-
-TransportFn = Callable[[Settings], None]
-PushFn = Callable[[Settings, list[Path]], None]
 
 
 def import_spec(workbook: Path, microtrade_yaml: Path, specs_out: Path) -> list[Path]:
@@ -118,7 +116,7 @@ def _run_stage1(settings: Settings, mt_hash: str) -> int:
     return failures
 
 
-def _run_stage2(settings: Settings, cfg: ProjectConfig, mt_hash: str, push: PushFn) -> int:
+def _run_stage2(settings: Settings, cfg: ProjectConfig, mt_hash: str, copy_file: CopyFn) -> int:
     dirty = plan_stage2(settings, cfg, microtrade_hash=mt_hash)
     if not dirty:
         logger.info("stage 2: nothing to do")
@@ -139,7 +137,7 @@ def _run_stage2(settings: Settings, cfg: ProjectConfig, mt_hash: str, push: Push
                     f"microtrade reported {summary.failed_count} partition failure(s)"
                 )
 
-            push(settings, [_year_output_dir(settings, key)])
+            push_processed(settings, [_year_output_dir(settings, key)], copy_file=copy_file)
 
             now = datetime.now(tz=UTC)
             for raw in raws:
@@ -162,57 +160,33 @@ def _run_stage2(settings: Settings, cfg: ProjectConfig, mt_hash: str, push: Push
     return failures
 
 
-def run(
-    settings: Settings,
-    *,
-    pull_manifests_fn: TransportFn | None = None,
-    mirror: TransportFn | None = None,
-    pull: TransportFn | None = None,
-    push: PushFn | None = None,
-    push_manifests_fn: TransportFn | None = None,
-) -> int:
+def run(settings: Settings, *, copy_file: CopyFn = _shutil_copy2) -> int:
     """Drive one ops cycle.
 
-    All five transport hooks default to the stubs in
-    ``microtrade.ops.transport``. Production callers supply their own:
-
-        from microtrade.ops.runner import run
-        from my_app.transport import (
-            pull_manifests, mirror, pull, push, push_manifests,
-        )
-        sys.exit(run(
-            settings,
-            pull_manifests_fn=pull_manifests,
-            mirror=mirror, pull=pull, push=push,
-            push_manifests_fn=push_manifests,
-        ))
-
-    Ordering inside ``run()``:
+    Ordering:
     ``pull_manifests -> mirror -> pull -> stage1 -> stage2(push) -> push_manifests``.
     ``pull_manifests`` runs *before* the dirty-check so shared state
     from other operators is honoured; ``push_manifests`` runs *after*
     both stages regardless of failures so partial progress is shared.
-    """
-    # Defaults resolved at call time (not function-def time) so
-    # monkeypatching microtrade.ops.runner.mirror_upstream_raw etc.
-    # still works for tests that don't override via kwargs.
-    pull_manifests_impl = pull_manifests_fn if pull_manifests_fn is not None else pull_manifests
-    mirror_fn = mirror if mirror is not None else mirror_upstream_raw
-    pull_fn = pull if pull is not None else pull_raw
-    push_fn = push if push is not None else push_processed
-    push_manifests_impl = push_manifests_fn if push_manifests_fn is not None else push_manifests
 
-    pull_manifests_impl(settings)
-    mirror_fn(settings)
-    pull_fn(settings)
+    ``copy_file`` is the single DI seam for environment-specific
+    transport: a ``Callable[[Path, Path], None]`` that moves one file
+    from ``src`` to ``dst``, preserving mtime. The default is a thin
+    ``shutil.copy2`` wrapper (local disk / mounted PV). Swap in a
+    ``kubectl cp`` / S3 ``put_object`` / etc. wrapper if the default
+    can't reach your remote.
+    """
+    pull_manifests(settings, copy_file=copy_file)
+    mirror_upstream_raw(settings, copy_file=copy_file)
+    pull_raw(settings, copy_file=copy_file)
 
     mt_hash = file_sha256(settings.microtrade_yaml)
     stage1_failures = _run_stage1(settings, mt_hash)
 
     cfg = mt_config.load_config(settings.microtrade_yaml)
-    stage2_failures = _run_stage2(settings, cfg, mt_hash, push_fn)
+    stage2_failures = _run_stage2(settings, cfg, mt_hash, copy_file)
 
-    push_manifests_impl(settings)
+    push_manifests(settings, copy_file=copy_file)
 
     total = stage1_failures + stage2_failures
     if total:
