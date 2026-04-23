@@ -48,7 +48,12 @@ def mirror(settings: Settings) -> None:
 
 
 def pull(settings: Settings) -> None:
-    _rsync(settings.raw_remote_dir / "current", settings.raw_dir)
+    # Upstream drops workbooks (.xls/.xlsx) and raw zips (.zip) into one
+    # directory. Split by extension on the way down so stage 1 reads
+    # workbooks_dir and stage 2 reads raw_dir without stepping on each other.
+    src = settings.raw_remote_dir / "current"
+    _rsync_filter(src, settings.raw_dir, ["*.zip"])
+    _rsync_filter(src, settings.workbooks_dir, ["*.xls", "*.xlsx"])
 
 
 def push(settings: Settings, paths: list[Path]) -> None:
@@ -74,6 +79,17 @@ def _rsync(src: Path, dst: Path) -> None:
         return
     dst.mkdir(parents=True, exist_ok=True)
     subprocess.run(["rsync", "-a", f"{src}/", f"{dst}/"], check=True)
+
+
+def _rsync_filter(src: Path, dst: Path, includes: list[str]) -> None:
+    if not src.exists():
+        return
+    dst.mkdir(parents=True, exist_ok=True)
+    args = ["rsync", "-a"]
+    for pat in includes:
+        args += ["--include", pat]
+    args += ["--exclude", "*", f"{src}/", f"{dst}/"]
+    subprocess.run(args, check=True)
 
 
 # --- 2. Entry point -------------------------------------------------------
