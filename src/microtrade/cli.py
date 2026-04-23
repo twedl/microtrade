@@ -6,6 +6,7 @@ Commands:
     import-spec    - convert an Excel schema workbook into versioned YAML specs
     validate-specs - lint YAML specs and print a changelog across versions
     inspect        - dump the resolved spec and first rows of a raw file
+    ops run        - drive a full cron-style ops run (stage 1 + stage 2) from a config.yaml
 """
 
 from __future__ import annotations
@@ -27,7 +28,32 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
+ops_app = typer.Typer(
+    name="ops",
+    help="Cron-driven orchestration: plan dirty workbooks/years and drive ingest.",
+    no_args_is_help=True,
+)
+app.add_typer(ops_app, name="ops")
+
+
 DEFAULT_SPEC_DIR = Path("specs")
+
+
+@ops_app.command("run")
+def ops_run(
+    config_path: Path = typer.Option(
+        Path("config.yaml"),
+        "--config",
+        exists=True,
+        dir_okay=False,
+        help="Path to the ops config.yaml (paths + dirs).",
+    ),
+) -> None:
+    """Drive a full ops run: stage 1 (spec generation) + stage 2 (year ingest)."""
+    from microtrade.ops.runner import run
+    from microtrade.ops.settings import load_settings
+
+    raise typer.Exit(code=run(load_settings(config_path)))
 
 
 @app.command()
