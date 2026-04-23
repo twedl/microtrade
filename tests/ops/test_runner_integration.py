@@ -124,9 +124,7 @@ def test_microtrade_yaml_change_retriggers_import(real_tree):
     wb = next(settings.workbooks_dir.iterdir())
     m1 = read_manifest(settings.spec_manifests_dir, wb.name, SpecManifest)
 
-    settings.microtrade_yaml.write_text(
-        settings.microtrade_yaml.read_text() + "\n# bumped\n"
-    )
+    settings.microtrade_yaml.write_text(settings.microtrade_yaml.read_text() + "\n# bumped\n")
     assert run(settings) == 0
     m2 = read_manifest(settings.spec_manifests_dir, wb.name, SpecManifest)
     assert m1 is not None and m2 is not None

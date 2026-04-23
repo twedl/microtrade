@@ -38,9 +38,7 @@ def _mark_workbook_clean(tree, wb: Path) -> None:
     write_manifest(settings.spec_manifests_dir, wb.name, m)
 
 
-def _mark_raw_clean(
-    tree, raw: Path, *, trade_type: str, year: str, month: str, flag: str
-) -> None:
+def _mark_raw_clean(tree, raw: Path, *, trade_type: str, year: str, month: str, flag: str) -> None:
     settings, _root = tree
     m = RawManifest(
         raw_name=raw.name,
@@ -83,9 +81,7 @@ def test_stage1_microtrade_yaml_changed_marks_all_dirty(tree):
     wb_b = _write_workbook(tree, "b.xls")
     _mark_workbook_clean(tree, wb_a)
     _mark_workbook_clean(tree, wb_b)
-    settings.microtrade_yaml.write_text(
-        settings.microtrade_yaml.read_text() + "\n# bumped\n"
-    )
+    settings.microtrade_yaml.write_text(settings.microtrade_yaml.read_text() + "\n# bumped\n")
     assert set(plan_stage1(settings)) == {wb_a, wb_b}
 
 
@@ -157,9 +153,7 @@ def test_stage2_microtrade_change_dirties_all_years(tree):
     b = _write_raw(tree, "S2_202001N.TXT.zip")
     _mark_raw_clean(tree, a, trade_type="imports", year="2020", month="01", flag="N")
     _mark_raw_clean(tree, b, trade_type="exports_us", year="2020", month="01", flag="N")
-    settings.microtrade_yaml.write_text(
-        settings.microtrade_yaml.read_text() + "\n# bump\n"
-    )
+    settings.microtrade_yaml.write_text(settings.microtrade_yaml.read_text() + "\n# bump\n")
     plan = plan_stage2(settings, _load_cfg(tree))
     assert set(plan.keys()) == {
         YearKey("imports", 2020),

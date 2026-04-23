@@ -27,9 +27,7 @@ class FakeAdapter:
         self.import_fail_for = import_fail_for or set()
         self.summary_failed_count = summary_failed_count
 
-    def import_spec(
-        self, workbook: Path, microtrade_yaml: Path, specs_out: Path
-    ) -> list[Path]:
+    def import_spec(self, workbook: Path, microtrade_yaml: Path, specs_out: Path) -> list[Path]:
         self.import_calls.append((workbook, microtrade_yaml, specs_out))
         if workbook.name in self.import_fail_for:
             raise RuntimeError(f"import boom: {workbook.name}")
@@ -72,9 +70,7 @@ def transport_spy(monkeypatch: pytest.MonkeyPatch):
         "microtrade.ops.runner.mirror_upstream_raw",
         lambda s: calls["mirror"].append(s),
     )
-    monkeypatch.setattr(
-        "microtrade.ops.runner.pull_raw", lambda s: calls["pull"].append(s)
-    )
+    monkeypatch.setattr("microtrade.ops.runner.pull_raw", lambda s: calls["pull"].append(s))
     monkeypatch.setattr(
         "microtrade.ops.runner.push_processed",
         lambda s, dirs: calls["push"].append(list(dirs)),
@@ -173,24 +169,17 @@ def test_stage1_failure_isolated_nonzero_exit(tree, transport_spy, install_adapt
     install_adapter(FakeAdapter(import_fail_for={bad_wb.name}))
     assert run(settings) == 1
 
-    assert (
-        read_manifest(settings.spec_manifests_dir, good_wb.name, SpecManifest) is not None
-    )
+    assert read_manifest(settings.spec_manifests_dir, good_wb.name, SpecManifest) is not None
     assert read_manifest(settings.spec_manifests_dir, bad_wb.name, SpecManifest) is None
 
 
-def test_microtrade_failed_count_triggers_year_failure(
-    tree, transport_spy, install_adapter
-):
+def test_microtrade_failed_count_triggers_year_failure(tree, transport_spy, install_adapter):
     settings, root = tree
     (root / "raw" / "S1_202001N.TXT.zip").write_bytes(b"raw")
 
     install_adapter(FakeAdapter(summary_failed_count=1))
     assert run(settings) == 1
-    assert (
-        read_manifest(settings.raw_manifests_dir, "S1_202001N.TXT.zip", RawManifest)
-        is None
-    )
+    assert read_manifest(settings.raw_manifests_dir, "S1_202001N.TXT.zip", RawManifest) is None
 
 
 def test_default_adapter_raises(tree, transport_spy):
