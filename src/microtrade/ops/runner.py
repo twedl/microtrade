@@ -23,7 +23,6 @@ from loguru import logger
 from microtrade import config as mt_config
 from microtrade import excel_spec, schema
 from microtrade.config import ProjectConfig
-from microtrade.ops.hashing import hash_file
 from microtrade.ops.manifest import (
     RawManifest,
     SpecManifest,
@@ -34,6 +33,7 @@ from microtrade.ops.settings import Settings, load_settings
 from microtrade.ops.transport import mirror_upstream_raw, pull_raw, push_processed
 from microtrade.pipeline import PipelineConfig, RunSummary
 from microtrade.pipeline import run as _mt_run
+from microtrade.schema import file_sha256
 
 
 def import_spec(workbook: Path, microtrade_yaml: Path, specs_out: Path) -> list[Path]:
@@ -77,20 +77,19 @@ def _year_output_dir(settings: Settings, key: YearKey) -> Path:
     return settings.processed_dir / key.trade_type / f"year={key.year}"
 
 
-def _run_stage1(settings: Settings) -> int:
-    dirty = plan_stage1(settings)
+def _run_stage1(settings: Settings, mt_hash: str) -> int:
+    dirty = plan_stage1(settings, microtrade_hash=mt_hash)
     if not dirty:
         logger.info("stage 1: nothing to do")
         return 0
     logger.info("stage 1: {} workbook(s) to process", len(dirty))
-    mt_hash = hash_file(settings.microtrade_yaml)
     failures = 0
     for wb in dirty:
         try:
             specs = import_spec(wb, settings.microtrade_yaml, settings.specs_dir)
             manifest = SpecManifest(
                 workbook_name=wb.name,
-                workbook_hash=hash_file(wb),
+                workbook_hash=file_sha256(wb),
                 microtrade_hash=mt_hash,
                 specs_written=specs,
                 processed_at=datetime.now(tz=UTC),
@@ -102,13 +101,12 @@ def _run_stage1(settings: Settings) -> int:
     return failures
 
 
-def _run_stage2(settings: Settings, cfg: ProjectConfig) -> int:
-    dirty = plan_stage2(settings, cfg)
+def _run_stage2(settings: Settings, cfg: ProjectConfig, mt_hash: str) -> int:
+    dirty = plan_stage2(settings, cfg, microtrade_hash=mt_hash)
     if not dirty:
         logger.info("stage 2: nothing to do")
         return 0
     logger.info("stage 2: {} (trade_type, year) to process", len(dirty))
-    mt_hash = hash_file(settings.microtrade_yaml)
     failures = 0
     for key, raws in dirty.items():
         try:
@@ -132,7 +130,7 @@ def _run_stage2(settings: Settings, cfg: ProjectConfig) -> int:
                 assert m is not None
                 manifest = RawManifest(
                     raw_name=raw.name,
-                    raw_hash=hash_file(raw),
+                    raw_hash=file_sha256(raw),
                     microtrade_hash=mt_hash,
                     trade_type=m.trade_type,
                     year=m.year,
@@ -151,10 +149,11 @@ def run(settings: Settings) -> int:
     mirror_upstream_raw(settings)
     pull_raw(settings)
 
-    stage1_failures = _run_stage1(settings)
+    mt_hash = file_sha256(settings.microtrade_yaml)
+    stage1_failures = _run_stage1(settings, mt_hash)
 
     cfg = mt_config.load_config(settings.microtrade_yaml)
-    stage2_failures = _run_stage2(settings, cfg)
+    stage2_failures = _run_stage2(settings, cfg, mt_hash)
 
     total = stage1_failures + stage2_failures
     if total:

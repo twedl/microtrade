@@ -37,14 +37,11 @@ def load_settings(yaml_path: Path) -> Settings:
     raw = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
     data: dict[str, Any] = dict(raw) if isinstance(raw, dict) else {}
 
-    for f in dataclasses.fields(Settings):
-        env_key = f"MT_{f.name.upper()}"
-        if env_key in os.environ:
-            data[f.name] = os.environ[env_key]
-
     kwargs: dict[str, Path] = {}
     for f in dataclasses.fields(Settings):
-        if f.name not in data:
+        env_value = os.environ.get(f"MT_{f.name.upper()}")
+        value = env_value if env_value is not None else data.get(f.name)
+        if value is None:
             raise SettingsError(f"missing required field {f.name!r} in {yaml_path}")
-        kwargs[f.name] = Path(str(data[f.name]))
+        kwargs[f.name] = Path(value)
     return Settings(**kwargs)

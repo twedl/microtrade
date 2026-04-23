@@ -2,9 +2,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from microtrade.config import load_config
-from microtrade.ops.hashing import hash_file
 from microtrade.ops.manifest import RawManifest, SpecManifest, write_manifest
 from microtrade.ops.planner import YearKey, plan_stage1, plan_stage2
+from microtrade.schema import file_sha256
 
 
 def _load_cfg(tree):
@@ -30,8 +30,8 @@ def _mark_workbook_clean(tree, wb: Path) -> None:
     settings, _root = tree
     m = SpecManifest(
         workbook_name=wb.name,
-        workbook_hash=hash_file(wb),
-        microtrade_hash=hash_file(settings.microtrade_yaml),
+        workbook_hash=file_sha256(wb),
+        microtrade_hash=file_sha256(settings.microtrade_yaml),
         specs_written=[],
         processed_at=datetime.now(tz=UTC),
     )
@@ -44,8 +44,8 @@ def _mark_raw_clean(
     settings, _root = tree
     m = RawManifest(
         raw_name=raw.name,
-        raw_hash=hash_file(raw),
-        microtrade_hash=hash_file(settings.microtrade_yaml),
+        raw_hash=file_sha256(raw),
+        microtrade_hash=file_sha256(settings.microtrade_yaml),
         trade_type=trade_type,
         year=year,
         month=month,

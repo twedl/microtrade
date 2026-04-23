@@ -21,13 +21,13 @@ from pathlib import Path
 from loguru import logger
 
 from microtrade.config import ProjectConfig
-from microtrade.ops.hashing import hash_file
 from microtrade.ops.manifest import (
     RawManifest,
     SpecManifest,
     read_manifest,
 )
 from microtrade.ops.settings import Settings
+from microtrade.schema import file_sha256
 
 
 @dataclass(frozen=True)
@@ -75,27 +75,29 @@ def match_raw(filename: str, cfg: ProjectConfig) -> Match | None:
     return None
 
 
-def plan_stage1(settings: Settings) -> list[Path]:
-    microtrade_hash = hash_file(settings.microtrade_yaml)
+def plan_stage1(settings: Settings, *, microtrade_hash: str | None = None) -> list[Path]:
+    mt_hash = microtrade_hash or file_sha256(settings.microtrade_yaml)
     dirty: list[Path] = []
     for wb in sorted(settings.workbooks_dir.iterdir()):
         if not wb.is_file():
             continue
         manifest = read_manifest(settings.spec_manifests_dir, wb.name, SpecManifest)
-        if manifest is None:
+        if (
+            manifest is None
+            or manifest.microtrade_hash != mt_hash
+            or manifest.workbook_hash != file_sha256(wb)
+        ):
             dirty.append(wb)
-            continue
-        if manifest.microtrade_hash != microtrade_hash:
-            dirty.append(wb)
-            continue
-        if manifest.workbook_hash != hash_file(wb):
-            dirty.append(wb)
-            continue
     return dirty
 
 
-def plan_stage2(settings: Settings, cfg: ProjectConfig) -> dict[YearKey, list[Path]]:
-    microtrade_hash = hash_file(settings.microtrade_yaml)
+def plan_stage2(
+    settings: Settings,
+    cfg: ProjectConfig,
+    *,
+    microtrade_hash: str | None = None,
+) -> dict[YearKey, list[Path]]:
+    mt_hash = microtrade_hash or file_sha256(settings.microtrade_yaml)
 
     years: dict[YearKey, list[Path]] = {}
     dirty_keys: set[YearKey] = set()
@@ -118,8 +120,8 @@ def plan_stage2(settings: Settings, cfg: ProjectConfig) -> dict[YearKey, list[Pa
         manifest = read_manifest(settings.raw_manifests_dir, raw.name, RawManifest)
         if (
             manifest is None
-            or manifest.microtrade_hash != microtrade_hash
-            or manifest.raw_hash != hash_file(raw)
+            or manifest.microtrade_hash != mt_hash
+            or manifest.raw_hash != file_sha256(raw)
         ):
             dirty_keys.add(key)
 
