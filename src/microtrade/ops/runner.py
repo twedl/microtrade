@@ -171,11 +171,10 @@ def run(
         from microtrade.ops.runner import run
         from my_app.transport import mirror, pull, push
         sys.exit(run(settings, mirror=mirror, pull=pull, push=push))
-
-    Defaults are resolved at call time (not at function-def time), so
-    ``monkeypatch.setattr("microtrade.ops.runner.mirror_upstream_raw",
-    ...)`` still works in tests that don't override via kwargs.
     """
+    # Defaults resolved at call time (not function-def time) so
+    # monkeypatching microtrade.ops.runner.mirror_upstream_raw etc.
+    # still works for tests that don't override via kwargs.
     mirror_fn = mirror if mirror is not None else mirror_upstream_raw
     pull_fn = pull if pull is not None else pull_raw
     push_fn = push if push is not None else push_processed

@@ -23,33 +23,13 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from collections.abc import Callable
 from pathlib import Path
 
 from microtrade.ops.runner import run
 from microtrade.ops.settings import Settings, load_settings
 
-# --- 1. Wire up transport -------------------------------------------------
-#
-# Replace the bodies with whatever your deployment needs. The contract:
-#
-#   mirror(settings)           # run once, before pull. Copy new/changed
-#                              # files from upstream_raw_dir into
-#                              # raw_remote_dir (upstream deletes drops
-#                              # periodically, so verify by content hash
-#                              # rather than mtime).
-#
-#   pull(settings)             # run once, before stage 2. Sync
-#                              # raw_remote_dir/current/ -> raw_dir so
-#                              # stage 2 has inputs on pod-local disk.
-#
-#   push(settings, year_dirs)  # run after each successful year. Push
-#                              # the listed processed year directories
-#                              # to the remote processed store.
-#
-# The example below uses ``rsync -a`` locally so you can see real I/O
-# happen without needing an S3 bucket. Nothing here is
-# microtrade-specific — swap in your own transport.
+# rsync stand-in for the real backend (S3, PV, kubectl cp, …). See
+# `microtrade.ops.transport` for the mirror/pull/push contract.
 
 
 def mirror(settings: Settings) -> None:
@@ -88,23 +68,14 @@ def main() -> None:
     _summarize(settings)
 
     print("\n=== run #1 ===")
-    rc1 = _run_with_transport(settings, mirror, pull, push)
+    rc1 = run(settings, mirror=mirror, pull=pull, push=push)
+    print(f"exit code: {rc1}")
 
     print("\n=== run #2 (expect 'stage 1/2: nothing to do' if inputs didn't change) ===")
-    rc2 = _run_with_transport(settings, mirror, pull, push)
+    rc2 = run(settings, mirror=mirror, pull=pull, push=push)
+    print(f"exit code: {rc2}")
 
     sys.exit(rc1 or rc2)
-
-
-def _run_with_transport(
-    settings: Settings,
-    mirror_fn: Callable[[Settings], None],
-    pull_fn: Callable[[Settings], None],
-    push_fn: Callable[[Settings, list[Path]], None],
-) -> int:
-    rc = run(settings, mirror=mirror_fn, pull=pull_fn, push=push_fn)
-    print(f"exit code: {rc}")
-    return rc
 
 
 def _summarize(settings: Settings) -> None:
