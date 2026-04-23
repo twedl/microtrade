@@ -252,20 +252,31 @@ site.
 
 ## Transport seam
 
-`microtrade.ops.transport` exports three stub functions that frame
-the ordering contract in `run()`:
+`microtrade.ops.transport` exports five stub functions that frame the
+ordering contract in `run()`:
 
 ```
-mirror_upstream_raw -> pull_raw -> stage 1 -> stage 2 (push_processed per year)
+pull_manifests -> mirror_upstream_raw -> pull_raw -> stage 1
+  -> stage 2 (push_processed per year) -> push_manifests
 ```
 
-Mirror before pull (upstream deletes periodically). Push per-year
-(not once at the end) so a failed year does not block successful
-years from reaching the remote.
+`pull_manifests` runs before any planning so shared dirty-check state
+from other operators is honoured; without it, a pod that doesn't have
+the previous run's PV treats everything as dirty. `push_manifests`
+runs at the end (not per-stage) so the remote sees all updates from
+this run atomically; it fires regardless of per-stage failures because
+partial progress is still worth sharing.
 
-The functions are `pass`-body today; the backend (rsync, s3, mounted
-PV, `kubectl cp`) slots in here without disturbing the rest of the
-pipeline. The contract is already testable via `transport_spy` in
+`mirror` before `pull` (upstream deletes periodically). `push` is
+per-year (not once at the end) so a failed year does not block
+successful years from reaching the remote.
+
+Production callers override each hook via kwargs on `run()`
+(`pull_manifests_fn=`, `mirror=`, `pull=`, `push=`,
+`push_manifests_fn=`); defaults resolve at call time to the
+module-level stubs, so `monkeypatch.setattr(...)` still works in
+tests. The whole ordering is pinned by
+`test_transport_kwargs_override_defaults` in
 `tests/ops/test_runner.py`.
 
 ## Pipeline entry point
@@ -274,11 +285,13 @@ pipeline. The contract is already testable via `transport_spy` in
 `microtrade.ops.runner.main`) does:
 
 1. Loads `config.yaml` via `load_settings`.
-2. Runs `mirror_upstream_raw` and `pull_raw`.
-3. Plans stage 1 (dirty workbooks). Runs stage 1 if any.
-4. Loads `microtrade.yaml` via `microtrade.config.load_config`.
-5. Plans stage 2 (dirty `(trade_type, year)` pairs). Runs stage 2 if any.
-6. On per-year failure: log with `logger.exception` and continue with
+2. Runs `pull_manifests` to fetch shared dirty-check state.
+3. Runs `mirror_upstream_raw` and `pull_raw`.
+4. Plans stage 1 (dirty workbooks). Runs stage 1 if any.
+5. Loads `microtrade.yaml` via `microtrade.config.load_config`.
+6. Plans stage 2 (dirty `(trade_type, year)` pairs). Runs stage 2 if any.
+7. Runs `push_manifests` to publish updated manifests.
+8. On per-year failure: log with `logger.exception` and continue with
    other years. Failed year has no raw-manifest updates, so it
    replans next run.
 

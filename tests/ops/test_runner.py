@@ -190,22 +190,46 @@ def test_default_adapter_raises(tree, transport_spy):
 
 
 def test_transport_kwargs_override_defaults(tree, install_adapter):
-    """Passing mirror/pull/push directly bypasses the module-level stubs."""
+    """Passing transport fns directly bypasses the module-level stubs,
+    and the full ordering (pull_manifests before stage 1, push_manifests
+    after stage 2) is honoured."""
     settings, root = tree
     (root / "workbooks" / "wb2020.xls").write_bytes(b"wb")
     (root / "raw" / "S1_202001N.TXT.zip").write_bytes(b"raw")
 
     install_adapter(FakeAdapter())
-    calls: dict[str, list] = {"mirror": [], "pull": [], "push": []}
+    order: list[str] = []
+    calls: dict[str, list] = {
+        "pull_manifests": [],
+        "mirror": [],
+        "pull": [],
+        "push": [],
+        "push_manifests": [],
+    }
+
+    def record(name: str):
+        def fn(*args):
+            calls[name].append(args)
+            order.append(name)
+
+        return fn
+
     assert (
         run(
             settings,
-            mirror=lambda s: calls["mirror"].append(s),
-            pull=lambda s: calls["pull"].append(s),
-            push=lambda s, dirs: calls["push"].append(list(dirs)),
+            pull_manifests_fn=record("pull_manifests"),
+            mirror=record("mirror"),
+            pull=record("pull"),
+            push=record("push"),
+            push_manifests_fn=record("push_manifests"),
         )
         == 0
     )
+    assert len(calls["pull_manifests"]) == 1
     assert len(calls["mirror"]) == 1
     assert len(calls["pull"]) == 1
     assert len(calls["push"]) == 1  # one dirty year
+    assert len(calls["push_manifests"]) == 1
+    # Ordering: pull_manifests first, push_manifests last.
+    assert order[0] == "pull_manifests"
+    assert order[-1] == "push_manifests"

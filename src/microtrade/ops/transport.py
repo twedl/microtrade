@@ -1,12 +1,20 @@
 """Data-movement seam between local pod disk and the durable remote store.
 
-The three functions are ordered around a single ``run()``:
+The five functions are ordered around a single ``run()``:
 
-1. ``mirror_upstream_raw`` — copy new/changed files from ``upstream_raw_dir``
+1. ``pull_manifests`` — fetch shared manifest dirs from the remote onto
+   local disk so the dirty-check sees work already done elsewhere.
+2. ``mirror_upstream_raw`` — copy new/changed files from ``upstream_raw_dir``
    into our archive ``raw_remote_dir`` (upstream deletes periodically).
-2. ``pull_raw`` — stage ``raw_remote_dir/current/`` onto pod-local ``raw_dir``.
-3. ``push_processed`` — push a written ``(trade_type, year)`` output dir to
+3. ``pull_raw`` — stage ``raw_remote_dir/current/`` onto pod-local ``raw_dir``.
+4. ``push_processed`` — push a written ``(trade_type, year)`` output dir to
    the remote processed store, called per successful year.
+5. ``push_manifests`` — publish updated manifest dirs back to the remote so
+   the next run (anywhere) sees the new state.
+
+Manifest hooks are what let multiple operators share a dirty-check
+across pods and hosts without all seeing "everything is dirty" on their
+first run. The raw/processed hooks handle bulk data movement.
 
 Stubs today so the contract and call-site ordering are locked in; the
 backend (rsync, s3, mounted PV, ``kubectl cp``) slots in here without
@@ -16,6 +24,16 @@ disturbing the rest of the pipeline.
 from pathlib import Path
 
 from microtrade.ops.settings import Settings
+
+
+def pull_manifests(settings: Settings) -> None:
+    """Fetch spec_manifests_dir and raw_manifests_dir from the remote store.
+
+    Called once at the start of `run()`, before any planning. Missing
+    remote state should result in a no-op so a fresh deployment still
+    runs cleanly (every manifest will look absent → everything dirty).
+    """
+    pass
 
 
 def mirror_upstream_raw(settings: Settings) -> None:
@@ -30,4 +48,14 @@ def pull_raw(settings: Settings) -> None:
 
 def push_processed(settings: Settings, paths: list[Path]) -> None:
     """Push given local paths to the remote processed store."""
+    pass
+
+
+def push_manifests(settings: Settings) -> None:
+    """Publish spec_manifests_dir and raw_manifests_dir to the remote store.
+
+    Called once at the end of `run()`, after both stages complete. Runs
+    even when some partitions failed - partial progress is still worth
+    sharing (a failed year simply has no manifest update to publish).
+    """
     pass

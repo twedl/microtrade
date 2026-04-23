@@ -38,7 +38,13 @@ from microtrade.ops.manifest import (
 )
 from microtrade.ops.planner import YearKey, match_raw, plan_stage1, plan_stage2
 from microtrade.ops.settings import Settings, load_settings
-from microtrade.ops.transport import mirror_upstream_raw, pull_raw, push_processed
+from microtrade.ops.transport import (
+    mirror_upstream_raw,
+    pull_manifests,
+    pull_raw,
+    push_manifests,
+    push_processed,
+)
 from microtrade.pipeline import PipelineConfig, RunSummary
 from microtrade.pipeline import run as _mt_run
 from microtrade.schema import file_sha256
@@ -159,26 +165,44 @@ def _run_stage2(settings: Settings, cfg: ProjectConfig, mt_hash: str, push: Push
 def run(
     settings: Settings,
     *,
+    pull_manifests_fn: TransportFn | None = None,
     mirror: TransportFn | None = None,
     pull: TransportFn | None = None,
     push: PushFn | None = None,
+    push_manifests_fn: TransportFn | None = None,
 ) -> int:
     """Drive one ops cycle.
 
-    ``mirror`` / ``pull`` / ``push`` default to the stubs in
+    All five transport hooks default to the stubs in
     ``microtrade.ops.transport``. Production callers supply their own:
 
         from microtrade.ops.runner import run
-        from my_app.transport import mirror, pull, push
-        sys.exit(run(settings, mirror=mirror, pull=pull, push=push))
+        from my_app.transport import (
+            pull_manifests, mirror, pull, push, push_manifests,
+        )
+        sys.exit(run(
+            settings,
+            pull_manifests_fn=pull_manifests,
+            mirror=mirror, pull=pull, push=push,
+            push_manifests_fn=push_manifests,
+        ))
+
+    Ordering inside ``run()``:
+    ``pull_manifests -> mirror -> pull -> stage1 -> stage2(push) -> push_manifests``.
+    ``pull_manifests`` runs *before* the dirty-check so shared state
+    from other operators is honoured; ``push_manifests`` runs *after*
+    both stages regardless of failures so partial progress is shared.
     """
     # Defaults resolved at call time (not function-def time) so
     # monkeypatching microtrade.ops.runner.mirror_upstream_raw etc.
     # still works for tests that don't override via kwargs.
+    pull_manifests_impl = pull_manifests_fn if pull_manifests_fn is not None else pull_manifests
     mirror_fn = mirror if mirror is not None else mirror_upstream_raw
     pull_fn = pull if pull is not None else pull_raw
     push_fn = push if push is not None else push_processed
+    push_manifests_impl = push_manifests_fn if push_manifests_fn is not None else push_manifests
 
+    pull_manifests_impl(settings)
     mirror_fn(settings)
     pull_fn(settings)
 
@@ -187,6 +211,11 @@ def run(
 
     cfg = mt_config.load_config(settings.microtrade_yaml)
     stage2_failures = _run_stage2(settings, cfg, mt_hash, push_fn)
+
+    # Publish manifests regardless of per-stage failures: a partially
+    # successful run still has new clean items worth sharing with the
+    # next operator.
+    push_manifests_impl(settings)
 
     total = stage1_failures + stage2_failures
     if total:

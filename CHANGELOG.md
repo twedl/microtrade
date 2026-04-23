@@ -6,6 +6,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `pull_manifests` and `push_manifests` hooks on the
+  `microtrade.ops.transport` seam so multiple operators can share
+  dirty-check state via whatever remote their other transport
+  functions already target (S3, NFS, etc.). `pull_manifests` runs at
+  the start of `run()` before any planning; `push_manifests` runs at
+  the end, regardless of per-stage failures (partial successes are
+  still worth sharing). Supplied as new kwargs on `run()`:
+  `pull_manifests_fn=` and `push_manifests_fn=`.
+- The `examples/ops_demo.py` walkthrough wires all five transport
+  hooks via local rsync so you can see the manifest-sync round-trip
+  without an S3 bucket.
+
 ## [0.2.6] - 2026-04-23
 
 ### Changed

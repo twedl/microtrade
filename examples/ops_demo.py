@@ -11,12 +11,14 @@ Demonstrates three things:
   1. Loading the ops Settings from a cwd-relative ``config.yaml``.
   2. Calling ``microtrade.ops.runner.run`` directly — same API the CLI
      (``microtrade ops run``) uses under the hood.
-  3. Supplying environment-specific transport functions
-     (``mirror`` / ``pull`` / ``push``) as kwargs to ``run()``. The
-     defaults are the ``pass``-body stubs in
-     ``microtrade.ops.transport``; overriding them is how you plug in
-     rsync, s3, mounted-PV, ``kubectl cp``, etc. without touching the
-     library.
+  3. Supplying all five environment-specific transport functions as
+     kwargs to ``run()`` — ``pull_manifests`` / ``mirror`` / ``pull`` /
+     ``push`` / ``push_manifests``. The defaults are the ``pass``-body
+     stubs in ``microtrade.ops.transport``; overriding them is how you
+     plug in rsync, s3, mounted-PV, ``kubectl cp``, etc. without
+     touching the library. The manifest hooks let multiple operators
+     share dirty-check state so nobody sees "everything dirty" just
+     because they don't have the other's PV.
 """
 
 from __future__ import annotations
@@ -29,7 +31,16 @@ from microtrade.ops.runner import run
 from microtrade.ops.settings import Settings, load_settings
 
 # rsync stand-in for the real backend (S3, PV, kubectl cp, …). See
-# `microtrade.ops.transport` for the mirror/pull/push contract.
+# `microtrade.ops.transport` for the full contract.
+#
+# Manifests live in their own remote root so two operators running from
+# different machines converge on the same dirty-check state.
+
+
+def pull_manifests(settings: Settings) -> None:
+    remote = _manifests_remote_root(settings)
+    _rsync(remote / "specs", settings.spec_manifests_dir)
+    _rsync(remote / "raw", settings.raw_manifests_dir)
 
 
 def mirror(settings: Settings) -> None:
@@ -45,6 +56,17 @@ def push(settings: Settings, paths: list[Path]) -> None:
     remote.mkdir(parents=True, exist_ok=True)
     for p in paths:
         _rsync(p, remote / p.relative_to(settings.processed_dir))
+
+
+def push_manifests(settings: Settings) -> None:
+    remote = _manifests_remote_root(settings)
+    remote.mkdir(parents=True, exist_ok=True)
+    _rsync(settings.spec_manifests_dir, remote / "specs")
+    _rsync(settings.raw_manifests_dir, remote / "raw")
+
+
+def _manifests_remote_root(settings: Settings) -> Path:
+    return settings.raw_remote_dir.parent / "manifests"
 
 
 def _rsync(src: Path, dst: Path) -> None:
@@ -67,12 +89,20 @@ def main() -> None:
     settings = load_settings(config_path)
     _summarize(settings)
 
+    transport_kwargs = {
+        "pull_manifests_fn": pull_manifests,
+        "mirror": mirror,
+        "pull": pull,
+        "push": push,
+        "push_manifests_fn": push_manifests,
+    }
+
     print("\n=== run #1 ===")
-    rc1 = run(settings, mirror=mirror, pull=pull, push=push)
+    rc1 = run(settings, **transport_kwargs)
     print(f"exit code: {rc1}")
 
     print("\n=== run #2 (expect 'stage 1/2: nothing to do' if inputs didn't change) ===")
-    rc2 = run(settings, mirror=mirror, pull=pull, push=push)
+    rc2 = run(settings, **transport_kwargs)
     print(f"exit code: {rc2}")
 
     sys.exit(rc1 or rc2)

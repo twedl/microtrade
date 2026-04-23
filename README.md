@@ -295,18 +295,31 @@ non-zero if any year or workbook failed; the failed items simply have
 no manifest update, so the next cronjob run replans them automatically.
 `loguru` handles logging (no custom sinks).
 
-A `transport` seam wraps the `mirror_upstream_raw → pull_raw → stage1 →
-stage2 (push_processed per year)` ordering contract. The default
-backends in `microtrade.ops.transport` are `pass`-body stubs; your
-deployment supplies real ones as kwargs to `run()`:
+A `transport` seam wraps the ordering contract:
+
+```
+pull_manifests → mirror → pull → stage 1 → stage 2 (push per year) → push_manifests
+```
+
+`pull_manifests` fetches the shared dirty-check state *before* planning
+so a pod that doesn't have the previous run's PV still skips already-
+done work. `push_manifests` publishes the updated state at the end of
+the run (even if some years failed — partial progress is worth
+sharing). The default backends in `microtrade.ops.transport` are
+`pass`-body stubs; your deployment supplies real ones as kwargs to
+`run()`:
 
 ```python
 from microtrade.ops.runner import run
 from microtrade.ops.settings import load_settings
-from my_app.transport import mirror, pull, push
+from my_app.transport import pull_manifests, mirror, pull, push, push_manifests
 
-sys.exit(run(load_settings(Path("config.yaml")),
-             mirror=mirror, pull=pull, push=push))
+sys.exit(run(
+    load_settings(Path("config.yaml")),
+    pull_manifests_fn=pull_manifests,
+    mirror=mirror, pull=pull, push=push,
+    push_manifests_fn=push_manifests,
+))
 ```
 
 Point your k8s CronJob's `command` at this wrapper instead of
