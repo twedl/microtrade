@@ -212,9 +212,6 @@ def run(
     cfg = mt_config.load_config(settings.microtrade_yaml)
     stage2_failures = _run_stage2(settings, cfg, mt_hash, push_fn)
 
-    # Publish manifests regardless of per-stage failures: a partially
-    # successful run still has new clean items worth sharing with the
-    # next operator.
     push_manifests_impl(settings)
 
     total = stage1_failures + stage2_failures
