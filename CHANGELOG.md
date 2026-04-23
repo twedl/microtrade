@@ -6,6 +6,27 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-04-23
+
+### Added
+
+- `microtrade.ops.transport.sync_tree(src, dst, patterns=None)` — a
+  pure-Python, stdlib-only `rsync -a`-like helper: skips files whose
+  size and mtime match the destination, writes atomically via
+  `target.tmp` + `os.replace` so concurrent readers never see a
+  half-copied file, and supports optional glob-pattern filtering on
+  the relative path. Use it directly from your transport
+  implementations when rsync / aws s3 sync / kubectl cp aren't
+  available on the box.
+
+### Changed
+
+- `examples/ops_demo.py` now uses `sync_tree` for all five transport
+  hooks instead of shelling out to `rsync`, so the walkthrough runs
+  on any machine out of the box. The `pull` hook also demonstrates
+  splitting a mixed upstream drop (workbooks + raw zips in one
+  directory) into `workbooks_dir` and `raw_dir` by extension.
+
 ## [0.2.7] - 2026-04-23
 
 ### Added

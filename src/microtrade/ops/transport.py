@@ -21,9 +21,46 @@ backend (rsync, s3, mounted PV, ``kubectl cp``) slots in here without
 disturbing the rest of the pipeline.
 """
 
+import os
+import shutil
+from collections.abc import Iterable
 from pathlib import Path
 
 from microtrade.ops.settings import Settings
+
+
+def sync_tree(src: Path, dst: Path, patterns: Iterable[str] | None = None) -> None:
+    """Copy ``src`` -> ``dst`` recursively, skipping files already up to date.
+
+    Pure-Python ``rsync -a``-ish semantics: copy a file when it is missing
+    at the destination or when its size / mtime differ. Preserves mtimes
+    via ``shutil.copy2`` so subsequent runs skip unchanged files, and writes
+    via ``target.tmp`` + ``os.replace`` so concurrent readers never see a
+    half-copied file.
+
+    Missing source is a no-op (a fresh deployment has nothing to mirror).
+    ``patterns`` filters by :py:meth:`pathlib.PurePath.match` against the
+    relative path; ``None`` copies every file.
+    """
+    if not src.exists():
+        return
+    for p in src.rglob("*"):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(src)
+        if patterns is not None and not any(rel.match(pat) for pat in patterns):
+            continue
+        target = dst / rel
+        if target.exists():
+            s, t = p.stat(), target.stat()
+            # Truncate to whole seconds: sub-second mtime isn't preserved
+            # across every filesystem (FAT, some network FS).
+            if s.st_size == t.st_size and int(s.st_mtime) == int(t.st_mtime):
+                continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(target.name + ".tmp")
+        shutil.copy2(p, tmp)
+        os.replace(tmp, target)
 
 
 def pull_manifests(settings: Settings) -> None:

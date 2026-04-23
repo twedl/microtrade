@@ -19,32 +19,39 @@ Demonstrates three things:
      touching the library. The manifest hooks let multiple operators
      share dirty-check state so nobody sees "everything dirty" just
      because they don't have the other's PV.
+
+This demo uses ``microtrade.ops.transport.sync_tree`` (pure-Python,
+stdlib-only, skips unchanged files by size+mtime) for every hook, so
+it works on any machine without rsync installed. Real deployments
+typically swap in rsync, ``aws s3 sync``, ``kubectl cp``, etc.
 """
 
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
 
 from microtrade.ops.runner import run
 from microtrade.ops.settings import Settings, load_settings
+from microtrade.ops.transport import sync_tree
 
-# rsync stand-in for the real backend (S3, PV, kubectl cp, …). See
-# `microtrade.ops.transport` for the full contract.
+# Backends for the five transport hooks. Uses microtrade.ops.transport.sync_tree
+# (pure-Python, stdlib-only, rsync-like skip-if-unchanged) so the demo runs on
+# any box. Swap sync_tree for rsync / aws s3 sync / kubectl cp / etc. in your
+# real deployment.
 #
-# Manifests live in their own remote root so two operators running from
+# Manifests live under their own remote root so two operators running from
 # different machines converge on the same dirty-check state.
 
 
 def pull_manifests(settings: Settings) -> None:
     remote = _manifests_remote_root(settings)
-    _rsync(remote / "specs", settings.spec_manifests_dir)
-    _rsync(remote / "raw", settings.raw_manifests_dir)
+    sync_tree(remote / "specs", settings.spec_manifests_dir)
+    sync_tree(remote / "raw", settings.raw_manifests_dir)
 
 
 def mirror(settings: Settings) -> None:
-    _rsync(settings.upstream_raw_dir, settings.raw_remote_dir / "current")
+    sync_tree(settings.upstream_raw_dir, settings.raw_remote_dir / "current")
 
 
 def pull(settings: Settings) -> None:
@@ -52,44 +59,24 @@ def pull(settings: Settings) -> None:
     # directory. Split by extension on the way down so stage 1 reads
     # workbooks_dir and stage 2 reads raw_dir without stepping on each other.
     src = settings.raw_remote_dir / "current"
-    _rsync_filter(src, settings.raw_dir, ["*.zip"])
-    _rsync_filter(src, settings.workbooks_dir, ["*.xls", "*.xlsx"])
+    sync_tree(src, settings.raw_dir, patterns=["*.zip"])
+    sync_tree(src, settings.workbooks_dir, patterns=["*.xls", "*.xlsx"])
 
 
 def push(settings: Settings, paths: list[Path]) -> None:
     remote = settings.raw_remote_dir.parent / "processed"
-    remote.mkdir(parents=True, exist_ok=True)
     for p in paths:
-        _rsync(p, remote / p.relative_to(settings.processed_dir))
+        sync_tree(p, remote / p.relative_to(settings.processed_dir))
 
 
 def push_manifests(settings: Settings) -> None:
     remote = _manifests_remote_root(settings)
-    remote.mkdir(parents=True, exist_ok=True)
-    _rsync(settings.spec_manifests_dir, remote / "specs")
-    _rsync(settings.raw_manifests_dir, remote / "raw")
+    sync_tree(settings.spec_manifests_dir, remote / "specs")
+    sync_tree(settings.raw_manifests_dir, remote / "raw")
 
 
 def _manifests_remote_root(settings: Settings) -> Path:
     return settings.raw_remote_dir.parent / "manifests"
-
-
-def _rsync(src: Path, dst: Path) -> None:
-    if not src.exists():
-        return
-    dst.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["rsync", "-a", f"{src}/", f"{dst}/"], check=True)
-
-
-def _rsync_filter(src: Path, dst: Path, includes: list[str]) -> None:
-    if not src.exists():
-        return
-    dst.mkdir(parents=True, exist_ok=True)
-    args = ["rsync", "-a"]
-    for pat in includes:
-        args += ["--include", pat]
-    args += ["--exclude", "*", f"{src}/", f"{dst}/"]
-    subprocess.run(args, check=True)
 
 
 # --- 2. Entry point -------------------------------------------------------
