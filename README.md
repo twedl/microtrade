@@ -246,6 +246,65 @@ Or with DuckDB:
 SELECT * FROM read_parquet('output/imports/**/*.parquet', hive_partitioning=1);
 ```
 
+## Ops: cron-driven runs
+
+`microtrade ops run` is a thin planner on top of `microtrade ingest` for
+unattended environments (k8s `CronJob`, typically). It hashes workbooks +
+raw zips, compares them against per-file JSON manifests on disk, and
+re-runs only the parts that actually changed. Use it when you want the
+"every N minutes, do the minimum work" loop; use `microtrade ingest`
+directly for one-shot manual reprocessing.
+
+Two stages per run:
+
+1. **Stage 1 — import-spec.** For each workbook under `workbooks_dir`
+   whose content hash (or the paired `microtrade.yaml` hash) differs
+   from its last manifest, re-run `microtrade import-spec` into
+   `specs_dir`.
+2. **Stage 2 — ingest.** Group raw zips under `raw_dir` by
+   `(trade_type, year)` via each sheet's `filename_pattern`. If any raw
+   in a year is dirty (new, changed, or the paired `microtrade.yaml`
+   changed), re-run `microtrade.pipeline.run` for that whole year (since
+   each raw is a YTD snapshot, the year is the reprocessing unit — not
+   the month).
+
+Paths + directories live in a separate `config.yaml` loaded by
+`microtrade.ops.settings` (env overrides: `MT_RAW_DIR=/data/raw`, etc.):
+
+```yaml
+# config.yaml
+microtrade_yaml:    /app/microtrade.yaml
+workbooks_dir:      /data/workbooks
+raw_dir:            /data/raw
+specs_dir:          /data/specs
+processed_dir:      /data/processed
+spec_manifests_dir: /data/manifests/specs
+raw_manifests_dir:  /data/manifests/raw
+upstream_raw_dir:   /mnt/upstream/raw   # where the provider drops files
+raw_remote_dir:     /mnt/remote/raw     # our durable archive
+```
+
+Run:
+
+```sh
+uv run microtrade ops run --config config.yaml
+```
+
+Exit code is 0 on clean completion (including "nothing to do") and
+non-zero if any year or workbook failed; the failed items simply have
+no manifest update, so the next cronjob run replans them automatically.
+`loguru` handles logging (no custom sinks).
+
+A `transport` seam (`microtrade.ops.transport`) wraps the
+`mirror_upstream_raw → pull_raw → stage1 → stage2 (push_processed per
+year)` ordering contract; the three backend functions are stubs today
+so you can plug in rsync / s3 / mounted-PV / `kubectl cp` without
+touching the rest of the pipeline.
+
+See `CLAUDE.md` for the full list of invariants (dirty-check logic,
+manifest schemas, k8s deployment guidance, what the ops layer
+explicitly does *not* do).
+
 ## Architecture
 
 ```
@@ -256,6 +315,7 @@ schema.resolve(specs, period)  -> Spec whose [effective_from, effective_to] cont
 ingest.iter_record_batches     -> pyarrow.RecordBatch stream (bounded memory)
 write.PartitionWriter          -> year=/month=/part-0.parquet.tmp, atomic rename
 pipeline.run                   -> orchestrates the above + JSONL manifest
+ops.planner + ops.runner       -> cron-driven dirty-check + dispatch on top of pipeline.run
 ```
 
 Key invariants:
@@ -290,8 +350,9 @@ code paths match the real production workflow end-to-end.
 ## Status
 
 The pipeline is feature-complete: scaffolding, project config, Excel → YAML,
-discover + ingest + write, and the orchestrated CLI subcommands (`ingest`,
-`import-spec`, `inspect`, `validate-specs`) are all landed and covered.
+discover + ingest + write, the orchestrated CLI subcommands (`ingest`,
+`import-spec`, `inspect`, `validate-specs`), and the cron-driven ops layer
+(`microtrade ops run`) are all landed and covered.
 Reference YAML specs ship under `src/microtrade/specs/` but predate the
 `filename_pattern` field (tracked in issue #16) — replace them by writing a
 `microtrade.yaml` and running `microtrade import-spec` against the real

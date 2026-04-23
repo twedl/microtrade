@@ -6,6 +6,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `microtrade.ops` submodule + `microtrade ops run` CLI subcommand: a
+  cron-driven planner on top of `microtrade.pipeline.run` that hashes
+  workbooks and raw zips against per-file JSON manifests and only
+  reprocesses the `(trade_type, year)` pairs that actually changed.
+  Ships with a `config.yaml` loader (+ `MT_`-prefixed env overrides), a
+  `match_raw` helper that reuses microtrade's existing `ProjectConfig`
+  parser, and a `transport` seam holding the
+  mirror → pull → stage1 → stage2 ordering contract. See the README
+  "Ops: cron-driven runs" section and CLAUDE.md for the full invariants.
+- `loguru` added as a runtime dependency; used by the ops layer and
+  available for logging anywhere else in the package.
+
 ## [0.2.4] - 2026-04-22
 
 ### Added
