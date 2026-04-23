@@ -6,6 +6,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-04-23
+
 ### Added
 
 - `pull_manifests` and `push_manifests` hooks on the

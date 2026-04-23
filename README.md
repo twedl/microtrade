@@ -295,6 +295,13 @@ non-zero if any year or workbook failed; the failed items simply have
 no manifest update, so the next cronjob run replans them automatically.
 `loguru` handles logging (no custom sinks).
 
+The manifests under `spec_manifests_dir` / `raw_manifests_dir` are the
+only stateful artifact the ops layer owns. Wire the `pull_manifests`
+and `push_manifests` transport hooks (below) to a shared backend and
+multiple operators — different pods, different clusters, different
+people — converge on the same "what's already clean" view without
+needing to share the rest of the PV.
+
 A `transport` seam wraps the ordering contract:
 
 ```
