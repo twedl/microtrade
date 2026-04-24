@@ -6,6 +6,27 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.12] - 2026-04-24
+
+### Fixed
+
+- `plan_stage1` now skips files in `workbooks_dir` that aren't named
+  in `microtrade.yaml`'s `workbooks` mapping (logged as a warning
+  instead of crashing `import_spec` with
+  `ConfigError: workbook ... is not listed`). This surfaced when
+  `workbooks_dir` and `raw_dir` pointed at the same path and raw
+  zips landed alongside workbooks.
+- `plan_stage1` now re-marks a workbook dirty if any path in its
+  manifest's `specs_written` is missing on disk. Previously,
+  reconfiguring `specs_dir` (or deleting specs manually) would leave
+  the manifest claiming "done at hash H" while stage 2's discovery
+  found no specs to route with, producing a silent no-op run.
+- `plan_stage2` now re-marks a `(trade_type, year)` dirty if
+  `processed_dir/<trade_type>/year=<year>/` doesn't exist or is
+  empty. Previously, reconfiguring `processed_dir` (or deleting
+  processed output manually) would leave raw manifests claiming
+  "done" while the parquet output was gone.
+
 ## [0.2.11] - 2026-04-24
 
 ### Changed
