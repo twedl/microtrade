@@ -42,9 +42,13 @@ class Match:
     flag: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, order=True)
 class YearKey:
-    """Reprocessing unit: one trade type, one calendar year."""
+    """Reprocessing unit: one trade type, one calendar year.
+
+    ``order=True`` gives tuple-order sorting on ``(trade_type, year)``,
+    which the runner relies on to process years deterministically.
+    """
 
     trade_type: str
     year: int
@@ -116,15 +120,15 @@ def plan_stage1(
 
 
 def _year_output_present(settings: Settings, key: YearKey) -> bool:
-    """True if the processed year dir exists and is non-empty.
+    """True if the remote processed year dir exists and is non-empty.
 
-    Checks ``processed_dir/<trade_type>/year=<year>/``. Guards against
-    the case where ``processed_dir`` was reconfigured (or the output
-    was deleted) after a prior successful run — without this, raw
-    manifests would claim "done" while the parquet output is missing,
-    and stage 2 would run as a silent no-op.
+    Checks ``processed_remote_dir/<trade_type>/year=<year>/``. The
+    per-year loop in ``_run_stage2`` deletes the local processed dir
+    after each push succeeds, so local is an unreliable source of
+    truth for "is this year done." Remote is where published output
+    lives and where this check belongs.
     """
-    year_dir = settings.processed_dir / key.trade_type / f"year={key.year}"
+    year_dir = settings.processed_remote_dir / key.trade_type / f"year={key.year}"
     return year_dir.is_dir() and any(year_dir.iterdir())
 
 
@@ -134,13 +138,29 @@ def plan_stage2(
     *,
     microtrade_hash: str | None = None,
 ) -> dict[YearKey, list[Path]]:
+    """Plan which ``(trade_type, year)`` pairs need re-ingest.
+
+    Iterates ``raw_remote_dir/current`` — the permanent archive — not
+    the ephemeral local ``raw_dir``. In the per-year model local
+    ``raw_dir`` is cleaned up after each year, so the remote archive
+    is the only reliable source of truth for "what raws exist."
+
+    Short-circuits the hash check: if the raw's remote mtime hasn't
+    advanced past the manifest's ``processed_at``, trust the manifest.
+    This avoids re-hashing multi-GB zips on every run. Only falls back
+    to a full hash compare when mtime suggests the file changed.
+    """
     mt_hash = microtrade_hash or file_sha256(settings.microtrade_yaml)
+    source_dir = settings.raw_remote_dir / "current"
 
     years: dict[YearKey, list[Path]] = {}
     dirty_keys: set[YearKey] = set()
 
-    for raw in sorted(settings.raw_dir.iterdir()):
-        if not raw.is_file():
+    if not source_dir.exists():
+        return {}
+
+    for raw in sorted(source_dir.iterdir()):
+        if not raw.is_file() or raw.suffix != ".zip":
             continue
         m = match_raw(raw.name, cfg)
         if m is None:
@@ -150,16 +170,21 @@ def plan_stage2(
         years.setdefault(key, []).append(raw)
 
         # Once a year is known dirty, every raw in it will be reprocessed;
-        # hashing further raws in that year is wasted I/O.
+        # re-checking further raws in that year is wasted I/O.
         if key in dirty_keys:
             continue
 
         manifest = read_manifest(settings.raw_manifests_dir, raw.name, RawManifest)
-        if (
-            manifest is None
-            or manifest.microtrade_hash != mt_hash
-            or manifest.raw_hash != file_sha256(raw)
-            or not _year_output_present(settings, key)
+        if manifest is None or manifest.microtrade_hash != mt_hash:
+            dirty_keys.add(key)
+            continue
+        if not _year_output_present(settings, key):
+            dirty_keys.add(key)
+            continue
+        # Cheap mtime short-circuit: only hash when the remote file
+        # mtime has advanced past when we processed it.
+        if int(raw.stat().st_mtime) > int(manifest.processed_at.timestamp()) and (
+            file_sha256(raw) != manifest.raw_hash
         ):
             dirty_keys.add(key)
 

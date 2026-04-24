@@ -8,6 +8,15 @@ from microtrade.ops.manifest import RawManifest, SpecManifest, read_manifest
 from microtrade.ops.runner import run
 
 
+def _drop_raw(settings, name: str, content: bytes = b"raw") -> Path:
+    """Drop a raw zip into the remote archive (plan_stage2's source of truth)."""
+    current = settings.raw_remote_dir / "current"
+    current.mkdir(parents=True, exist_ok=True)
+    p = current / name
+    p.write_bytes(content)
+    return p
+
+
 @dataclass
 class FakeSummary:
     failed_count: int = 0
@@ -76,10 +85,10 @@ def test_happy_path(tree, install_adapter):
     settings, root = tree
     wb = root / "workbooks" / "wb2020.xls"
     wb.write_bytes(b"workbook")
-    raw_a = root / "raw" / "S1_202001N.TXT.zip"
-    raw_a.write_bytes(b"raw-a")
-    raw_b = root / "raw" / "S2_202003N.TXT.zip"
-    raw_b.write_bytes(b"raw-b")
+    # Raws live in the remote archive — the per-year loop pulls each
+    # year into raw_dir at ingest time and cleans up afterwards.
+    raw_a = _drop_raw(settings, "S1_202001N.TXT.zip", b"raw-a")
+    raw_b = _drop_raw(settings, "S2_202003N.TXT.zip", b"raw-b")
 
     adapter = install_adapter(FakeAdapter())
     assert run(settings) == 0
@@ -112,11 +121,20 @@ def test_happy_path(tree, install_adapter):
     assert (settings.manifests_remote_dir / "specs" / "wb2020.xls.json").is_file()
     assert (settings.manifests_remote_dir / "raw" / f"{raw_a.name}.json").is_file()
 
+    # cleanup_local_year ran for each successful year — local raw_dir
+    # and local processed output are empty, so peak disk stays bounded.
+    assert not any(settings.raw_dir.iterdir())
+    assert not (settings.processed_dir / "imports" / "year=2020").exists()
+    assert not (settings.processed_dir / "exports_us" / "year=2020").exists()
+    # Remote archive is permanent — raws still there for future reference.
+    assert raw_a.exists()
+    assert raw_b.exists()
+
 
 def test_rerun_is_noop(tree, install_adapter):
     settings, root = tree
     (root / "workbooks" / "wb2020.xls").write_bytes(b"wb")
-    (root / "raw" / "S1_202001N.TXT.zip").write_bytes(b"raw")
+    _drop_raw(settings, "S1_202001N.TXT.zip")
 
     a1 = install_adapter(FakeAdapter())
     assert run(settings) == 0
@@ -132,10 +150,8 @@ def test_rerun_is_noop(tree, install_adapter):
 def test_year_failure_isolated_nonzero_exit(tree, install_adapter):
     settings, root = tree
     (root / "workbooks" / "wb2020.xls").write_bytes(b"wb")
-    good = root / "raw" / "S1_202001N.TXT.zip"
-    bad = root / "raw" / "S2_202003N.TXT.zip"
-    good.write_bytes(b"g")
-    bad.write_bytes(b"b")
+    good = _drop_raw(settings, "S1_202001N.TXT.zip", b"g")
+    bad = _drop_raw(settings, "S2_202003N.TXT.zip", b"b")
 
     install_adapter(FakeAdapter(ingest_fail_for={("exports_us", 2020)}))
     assert run(settings) == 1
@@ -145,6 +161,9 @@ def test_year_failure_isolated_nonzero_exit(tree, install_adapter):
     # Good year published; bad year did not.
     assert (settings.processed_remote_dir / "imports" / "year=2020").is_dir()
     assert not (settings.processed_remote_dir / "exports_us" / "year=2020").exists()
+    # Local raw_dir cleaned for both years — good via the success path,
+    # bad via the ingest-failure path (raws_only=True).
+    assert not any(settings.raw_dir.iterdir())
 
 
 def test_stage1_failure_isolated_nonzero_exit(tree, install_adapter):
@@ -162,8 +181,8 @@ def test_stage1_failure_isolated_nonzero_exit(tree, install_adapter):
 
 
 def test_microtrade_failed_count_triggers_year_failure(tree, install_adapter):
-    settings, root = tree
-    (root / "raw" / "S1_202001N.TXT.zip").write_bytes(b"raw")
+    settings, _root = tree
+    _drop_raw(settings, "S1_202001N.TXT.zip")
 
     install_adapter(FakeAdapter(summary_failed_count=1))
     assert run(settings) == 1
@@ -178,16 +197,20 @@ def test_default_adapter_raises(tree):
 
 
 def test_copy_file_is_used_by_every_hook(tree, install_adapter):
-    """A custom copy_file is threaded through pull_manifests, mirror_upstream_raw,
-    pull_raw, push_processed, and push_manifests."""
-    settings, root = tree
-    (root / "workbooks" / "wb2020.xls").write_bytes(b"wb")
-    (root / "raw" / "S1_202001N.TXT.zip").write_bytes(b"raw")
+    """A custom copy_file threads through every hook that has work to do:
+    pull_manifests, mirror_upstream_raw, pull_workbooks, pull_raws_for_year,
+    push_processed, push_manifests."""
+    settings, _root = tree
 
-    # Populate the remote so pull_manifests, mirror, and pull all have work.
+    # Populate upstream with a zip and an xlsx so mirror + pull_workbooks
+    # both have something to copy; raw_dir starts empty so the per-year
+    # pull has to pull the zip from the raw_remote_dir.
     upstream_zip = settings.upstream_raw_dir / "S1_202001N.TXT.zip"
+    upstream_wb = settings.upstream_raw_dir / "wb2020.xls"
     upstream_zip.parent.mkdir(parents=True, exist_ok=True)
     upstream_zip.write_bytes(b"upstream-z")
+    upstream_wb.write_bytes(b"upstream-wb")
+
     seeded_manifest = settings.manifests_remote_dir / "raw" / "seed.json"
     seeded_manifest.parent.mkdir(parents=True, exist_ok=True)
     seeded_manifest.write_text("{}")
@@ -202,16 +225,86 @@ def test_copy_file_is_used_by_every_hook(tree, install_adapter):
 
     assert run(settings, copy_file=spy) == 0
 
-    # copy_file receives the final target path; atomicity is the
-    # copy_file's job, not sync_tree's.
+    # copy_file receives the final target path; atomicity is the copy_file's job.
     assert calls, "expected copy_file to be invoked at least once"
     assert not any(d.name.endswith(".tmp") for _, d in calls)
 
-    # Every hook that has work to do went through the spy. Checked by
-    # destinations the copy targets land under.
     dsts = [d for _, d in calls]
     assert any(settings.raw_remote_dir / "current" in d.parents for d in dsts)  # mirror
-    assert any(settings.raw_dir in d.parents for d in dsts)  # pull_raw (zip split)
+    assert any(settings.workbooks_dir in d.parents for d in dsts)  # pull_workbooks
+    assert any(settings.raw_dir in d.parents for d in dsts)  # pull_raws_for_year
     assert any(settings.processed_remote_dir in d.parents for d in dsts)  # push_processed
     assert any(settings.manifests_remote_dir in d.parents for d in dsts)  # push_manifests
     assert any(settings.raw_manifests_dir in d.parents for d in dsts)  # pull_manifests
+
+
+def test_push_failure_aborts_stage_2_retains_local_parquet(
+    tree, install_adapter, monkeypatch
+):
+    """Fail-fast on push: stop processing later years, keep local parquet.
+
+    Rationale: if push fails, continuing to other years would accumulate
+    unpushed parquet on local disk and defeat the point of the per-year
+    cycle. Next run will pick up from the retained parquet.
+    """
+    settings, root = tree
+    (root / "workbooks" / "wb2020.xls").write_bytes(b"wb")
+    a = _drop_raw(settings, "S1_202001N.TXT.zip", b"a")
+    b = _drop_raw(settings, "S2_202003N.TXT.zip", b"b")
+
+    install_adapter(FakeAdapter())
+
+    push_attempts: list = []
+
+    def failing_push(settings_, paths, *, copy_file):
+        push_attempts.append(list(paths))
+        raise RuntimeError("push boom")
+
+    monkeypatch.setattr("microtrade.ops.runner.push_processed", failing_push)
+
+    assert run(settings) == 1
+
+    # Fail-fast: push attempted exactly once (first dirty year), no later years.
+    assert len(push_attempts) == 1
+    # Local parquet retained for the attempted year so retry doesn't re-ingest.
+    # Years are processed sorted by (trade_type, year); exports_us sorts before imports.
+    assert (settings.processed_dir / "exports_us" / "year=2020").is_dir()
+    # The later year was never ingested.
+    assert not (settings.processed_dir / "imports" / "year=2020").exists()
+    # No raw manifests written (push for the attempted year failed; the later
+    # year never ran).
+    assert read_manifest(settings.raw_manifests_dir, a.name, RawManifest) is None
+    assert read_manifest(settings.raw_manifests_dir, b.name, RawManifest) is None
+
+
+def test_per_year_pull_only_pulls_that_years_zips(tree, install_adapter, monkeypatch):
+    """pull_raws_for_year filters by (trade_type, year) so local disk
+    only ever holds one year's zips, not the whole archive."""
+    settings, _root = tree
+
+    # Remote archive has zips for two different years. Only the dirty
+    # year's zips should land in raw_dir when its turn comes.
+    current = settings.raw_remote_dir / "current"
+    current.mkdir(parents=True, exist_ok=True)
+    (current / "S1_202001N.TXT.zip").write_bytes(b"y2020")
+    (current / "S1_202101N.TXT.zip").write_bytes(b"y2021")
+
+    seen_raw_dir_contents: list[set[str]] = []
+
+    adapter = install_adapter(FakeAdapter())
+    original_ingest = adapter.ingest_year
+
+    def snooping_ingest(trade_type, year, raw_dir, specs_dir, out_dir):
+        seen_raw_dir_contents.append({p.name for p in raw_dir.iterdir()})
+        return original_ingest(trade_type, year, raw_dir, specs_dir, out_dir)
+
+    monkeypatch.setattr("microtrade.ops.runner.ingest_year", snooping_ingest)
+
+    assert run(settings) == 0
+
+    # Two years processed. At ingest time, raw_dir held ONLY the current
+    # year's zip — the cleanup from the prior year plus the filter in
+    # pull_raws_for_year ensure no cross-year accumulation.
+    assert len(seen_raw_dir_contents) == 2
+    for contents in seen_raw_dir_contents:
+        assert len(contents) == 1

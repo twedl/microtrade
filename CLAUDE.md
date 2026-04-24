@@ -266,26 +266,57 @@ site.
 
 ## Transport seam
 
-`microtrade.ops.transport` exports five real (not stub) hook
-functions that frame the ordering contract in `run()`:
+`microtrade.ops.transport` exports real (not stub) hook functions
+that frame the ordering contract in `run()`:
 
 ```
-pull_manifests -> mirror_upstream_raw -> pull_raw -> stage 1
-  -> stage 2 (push_processed per year) -> push_manifests
+pull_manifests -> mirror_upstream_raw -> pull_workbooks -> stage 1
+  -> stage 2 (per year: pull_raws -> ingest -> push -> cleanup)
+  -> push_manifests
 ```
 
 `pull_manifests` runs before any planning so shared dirty-check state
 from other operators is honoured; without it, a pod that doesn't have
-the previous run's PV treats everything as dirty. `push_manifests`
-runs at the end (not per-stage) so the remote sees all updates from
-this run atomically; it fires regardless of per-stage failures because
-partial progress is still worth sharing.
+the previous run's PV treats everything as dirty.
 
-`mirror` before `pull` (upstream deletes periodically). `push` is
-per-year (not once at the end) so a failed year does not block
-successful years from reaching the remote. `pull_raw` splits the
-upstream drop by extension: `*.zip` -> `raw_dir` (stage 2 input),
-`*.xls` / `*.xlsx` -> `workbooks_dir` (stage 1 input).
+`mirror_upstream_raw` runs next because upstream drops get deleted
+periodically — mirroring is how we keep the archive whole. Then
+`pull_workbooks` stages every `.xls`/`.xlsx` into `workbooks_dir`
+upfront (they're small, shared across years, and needed by stage 1).
+
+**Stage 2 is a per-year pull-ingest-push-cleanup loop, not a bulk
+copy.** For each dirty `(trade_type, year)`:
+
+1. `pull_raws_for_year` stages ONLY that year's zips from
+   `raw_remote_dir/current` into `raw_dir` (filtered via
+   `match_raw`).
+2. `ingest_year` runs microtrade against `raw_dir`.
+3. `push_processed` publishes that year's parquet to
+   `processed_remote_dir`.
+4. `cleanup_local_year` deletes both local raws and local parquet
+   for that year. Peak local disk is one year's worth of data, not
+   the whole archive.
+
+Failure semantics:
+
+- **Ingest failure**: isolated to that year. Local raws for the
+  failed year get deleted (re-pullable next run); later years
+  continue; run returns non-zero.
+- **Push failure**: fail-fast. Keep local parquet so the retry
+  doesn't re-ingest. Abort the stage 2 loop (continuing would
+  accumulate unpushed parquet across years, defeating the cycle).
+- `push_manifests` still runs at the end regardless of either
+  failure so partial progress reaches the remote.
+
+`plan_stage2` iterates `raw_remote_dir/current` (the permanent
+archive), not `raw_dir`, because local `raw_dir` is ephemeral under
+the cleanup loop. It short-circuits the hash check with an mtime
+probe: if the remote file's mtime hasn't advanced past the
+manifest's `processed_at`, trust the manifest and skip the hash
+(avoids re-hashing multi-GB zips on every run). The
+output-exists check on a clean manifest runs against
+`processed_remote_dir` — published parquet is the source of truth
+for "year is done", not the ephemeral local copy.
 
 **Path routing is baked into the library; only the per-file transfer
 primitive is DI.** `run()` accepts a single `copy_file` kwarg, a
@@ -325,14 +356,17 @@ land by editing config, not by overriding hooks.
 
 1. Loads `config.yaml` via `load_settings`.
 2. Runs `pull_manifests` to fetch shared dirty-check state.
-3. Runs `mirror_upstream_raw` and `pull_raw`.
+3. Runs `mirror_upstream_raw`, then `pull_workbooks`.
 4. Plans stage 1 (dirty workbooks). Runs stage 1 if any.
 5. Loads `microtrade.yaml` via `microtrade.config.load_config`.
-6. Plans stage 2 (dirty `(trade_type, year)` pairs). Runs stage 2 if any.
+6. Plans stage 2 (dirty `(trade_type, year)` pairs against the
+   remote archive). For each dirty year in sorted order, runs the
+   pull-ingest-push-cleanup cycle.
 7. Runs `push_manifests` to publish updated manifests.
-8. On per-year failure: log with `logger.exception` and continue with
-   other years. Failed year has no raw-manifest updates, so it
-   replans next run.
+8. On ingest failure: log with `logger.exception`, delete local
+   raws for the year, continue with other years. On push failure:
+   log, keep local parquet, abort stage 2 early. Failed years have
+   no raw-manifest updates, so they replan next run.
 
 ## Kubernetes deployment notes
 

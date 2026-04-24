@@ -19,10 +19,11 @@ Demonstrates:
      works on any machine without rsync / aws cli / kubectl installed.
 
 The library owns all path routing: ``mirror_upstream_raw`` /
-``pull_raw`` / ``push_processed`` / ``pull_manifests`` /
-``push_manifests`` are real implementations in
-``microtrade.ops.transport``, not stubs. Your ``config.yaml`` picks
-the paths; ``copy_file`` picks the primitive.
+``pull_workbooks`` / ``pull_raws_for_year`` / ``push_processed`` /
+``cleanup_local_year`` / ``pull_manifests`` / ``push_manifests``
+are real implementations in ``microtrade.ops.transport``, not
+stubs. Your ``config.yaml`` picks the paths; ``copy_file`` picks
+the primitive.
 """
 
 from __future__ import annotations

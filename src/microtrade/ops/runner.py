@@ -1,22 +1,34 @@
 """Cron-driven orchestration over microtrade's ingest pipeline.
 
 A single ``run(settings)`` call drives the ordering:
-``pull_manifests -> mirror_upstream_raw -> pull_raw -> stage 1 -> stage 2
-(push_processed per year) -> push_manifests``. Stage 1 regenerates spec
-YAMLs for dirty workbooks; stage 2 ingests each dirty
-``(trade_type, year)`` and only records its raw manifests on success,
-so a failed year self-heals on the next run.
+
+``pull_manifests -> mirror_upstream_raw -> pull_workbooks -> stage 1
+-> stage 2 (per year: pull_raws -> ingest -> push -> cleanup)
+-> push_manifests``.
+
+Stage 1 regenerates spec YAMLs for dirty workbooks. Stage 2 processes
+each dirty ``(trade_type, year)`` in a pull-ingest-push-cleanup loop so
+local disk peak is one year's worth of data, not the whole archive.
+
+Failure semantics:
+- Ingest failure: isolate to that year — delete local raws (safe to
+  re-pull next run), skip manifest writes, continue to the next year.
+- Push failure: abort stage 2. Keep local parquet so the next run's
+  retry can publish without re-ingesting. Later dirty years are left
+  for subsequent runs.
+- Either failure causes ``run()`` to return non-zero.
+- ``push_manifests`` always runs so partial progress reaches the remote.
 
 ``import_spec`` and ``ingest_year`` are module-level functions that the
 test suite replaces via ``monkeypatch.setattr`` (see
-``tests/ops/test_runner.py``) — no adapter class, no dependency
-injection ceremony at the call site.
+``tests/ops/test_runner.py``) — no adapter class, no DI ceremony at the
+call site.
 
 Transport is environment-specific. ``run()`` accepts a single
 ``copy_file`` kwarg — the per-file transfer primitive — which threads
-through every hook in ``microtrade.ops.transport`` and through
-``sync_tree``. The library owns path routing and tree-walk / atomic
-publish; the caller only supplies "how to move one file".
+through every hook in ``microtrade.ops.transport``. The library owns
+path routing and tree-walk / atomic-publish; the caller supplies only
+"how to move one file".
 """
 
 from __future__ import annotations
@@ -40,9 +52,12 @@ from microtrade.ops.settings import Settings, load_settings
 from microtrade.ops.transport import (
     CopyFn,
     _shutil_copy2,
+    cleanup_local_raws,
+    cleanup_local_year,
     mirror_upstream_raw,
     pull_manifests,
-    pull_raw,
+    pull_raws_for_year,
+    pull_workbooks,
     push_manifests,
     push_processed,
 )
@@ -116,14 +131,43 @@ def _run_stage1(settings: Settings, cfg: ProjectConfig, mt_hash: str) -> int:
     return failures
 
 
-def _run_stage2(settings: Settings, cfg: ProjectConfig, mt_hash: str, copy_file: CopyFn) -> int:
+def _write_raw_manifests(
+    settings: Settings, cfg: ProjectConfig, raws: list[Path], mt_hash: str
+) -> None:
+    now = datetime.now(tz=UTC)
+    for raw in raws:
+        m = match_raw(raw.name, cfg)
+        assert m is not None
+        manifest = RawManifest(
+            raw_name=raw.name,
+            raw_hash=file_sha256(raw),
+            microtrade_hash=mt_hash,
+            trade_type=m.trade_type,
+            year=m.year,
+            month=m.month,
+            flag=m.flag or "",
+            processed_at=now,
+        )
+        write_manifest(settings.raw_manifests_dir, raw.name, manifest)
+
+
+def _run_stage2(
+    settings: Settings, cfg: ProjectConfig, mt_hash: str, copy_file: CopyFn
+) -> int:
     dirty = plan_stage2(settings, cfg, microtrade_hash=mt_hash)
     if not dirty:
         logger.info("stage 2: nothing to do")
         return 0
     logger.info("stage 2: {} (trade_type, year) to process", len(dirty))
     failures = 0
-    for key, raws in dirty.items():
+    for key in sorted(dirty):
+        try:
+            local_raws = pull_raws_for_year(settings, dirty[key], copy_file=copy_file)
+        except Exception:
+            logger.exception("pull_raws_for_year failed for {}", key)
+            failures += 1
+            continue
+
         try:
             summary = ingest_year(
                 trade_type=key.trade_type,
@@ -136,27 +180,24 @@ def _run_stage2(settings: Settings, cfg: ProjectConfig, mt_hash: str, copy_file:
                 raise RuntimeError(
                     f"microtrade reported {summary.failed_count} partition failure(s)"
                 )
-
-            push_processed(settings, [_year_output_dir(settings, key)], copy_file=copy_file)
-
-            now = datetime.now(tz=UTC)
-            for raw in raws:
-                m = match_raw(raw.name, cfg)
-                assert m is not None
-                manifest = RawManifest(
-                    raw_name=raw.name,
-                    raw_hash=file_sha256(raw),
-                    microtrade_hash=mt_hash,
-                    trade_type=m.trade_type,
-                    year=m.year,
-                    month=m.month,
-                    flag=m.flag or "",
-                    processed_at=now,
-                )
-                write_manifest(settings.raw_manifests_dir, raw.name, manifest)
         except Exception:
-            logger.exception("stage 2 failed for {}", key)
+            logger.exception("stage 2 ingest failed for {}", key)
+            cleanup_local_raws(settings)
             failures += 1
+            continue
+
+        try:
+            push_processed(settings, [_year_output_dir(settings, key)], copy_file=copy_file)
+        except Exception:
+            # Keep local parquet so the retry doesn't re-ingest.
+            logger.exception(
+                "stage 2 push failed for {}; keeping local parquet, aborting stage 2", key
+            )
+            return failures + 1
+
+        _write_raw_manifests(settings, cfg, local_raws, mt_hash)
+        cleanup_local_year(settings, key)
+
     return failures
 
 
@@ -164,21 +205,25 @@ def run(settings: Settings, *, copy_file: CopyFn = _shutil_copy2) -> int:
     """Drive one ops cycle.
 
     Ordering:
-    ``pull_manifests -> mirror -> pull -> stage1 -> stage2(push) -> push_manifests``.
+    ``pull_manifests -> mirror -> pull_workbooks -> stage1 ->
+    stage2(per year: pull -> ingest -> push -> cleanup) -> push_manifests``.
+
     ``pull_manifests`` runs *before* the dirty-check so shared state
-    from other operators is honoured; ``push_manifests`` runs *after*
-    both stages regardless of failures so partial progress is shared.
+    from other operators is honoured. ``pull_workbooks`` runs once
+    upfront since workbooks are small and stage 1 needs them all.
+    ``push_manifests`` runs *after* both stages regardless of
+    failures so partial progress is shared.
 
     ``copy_file`` is the single DI seam for environment-specific
     transport: a ``Callable[[Path, Path], None]`` that moves one file
-    from ``src`` to ``dst``, preserving mtime. The default is a thin
-    ``shutil.copy2`` wrapper (local disk / mounted PV). Swap in a
-    ``kubectl cp`` / S3 ``put_object`` / etc. wrapper if the default
-    can't reach your remote.
+    from ``src`` to ``dst``. The default is a thin ``shutil.copy2``
+    wrapper (local disk / mounted PV). Swap in a ``kubectl cp`` /
+    S3 ``put_object`` / etc. wrapper if the default can't reach your
+    remote.
     """
     pull_manifests(settings, copy_file=copy_file)
     mirror_upstream_raw(settings, copy_file=copy_file)
-    pull_raw(settings, copy_file=copy_file)
+    pull_workbooks(settings, copy_file=copy_file)
 
     mt_hash = file_sha256(settings.microtrade_yaml)
     cfg = mt_config.load_config(settings.microtrade_yaml)

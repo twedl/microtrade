@@ -314,9 +314,14 @@ sequenceDiagram
 
     R->>L: pull_manifests
     U->>R: mirror
-    R->>L: pull_raw  (zip → raw_dir, xls → workbooks_dir)
-    Note over L: Process (see below)
-    L->>R: push_processed  (per year)
+    R->>L: pull_workbooks  (xls → workbooks_dir, once)
+    Note over L: Stage 1 (see below)
+    loop per dirty (trade_type, year)
+        R->>L: pull_raws_for_year  (zip → raw_dir)
+        Note over L: ingest_year (see below)
+        L->>R: push_processed
+        Note over L: cleanup_local_year  (rm raws + parquet)
+    end
     L->>R: push_manifests
 ```
 
