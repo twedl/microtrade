@@ -6,6 +6,22 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.17] - 2026-04-24
+
+### Added
+
+- `Settings.log_file` (optional, default `None`). When set via
+  `config.yaml` or `MT_LOG_FILE`, `run()` adds a loguru file sink
+  (10 MB rotation, 10 retained files) alongside the default stderr
+  sink for the duration of the run. The sink is removed on return
+  so repeated `run()` calls don't leak handles.
+- Per-year stage 2 logs now include:
+  - `year N/M: trade_type year=YYYY (K raw(s), S MiB)` at the top
+    of each iteration;
+  - `pulled in T.Ts`, `ingested in T.Ts: P partition(s), R rows,
+    X skipped`, and `pushed in T.Ts` phase timings;
+  - `stage 2 done: N year(s), R rows in T.Ts` summary at the end.
+
 ## [0.2.16] - 2026-04-24
 
 ### Changed
