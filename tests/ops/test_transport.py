@@ -60,9 +60,10 @@ def test_sync_tree_uses_injected_copy_file(tmp_path: Path) -> None:
 
     sync_tree(src, dst, copy_file=fake_copy)
 
-    # Two files copied, each via a .tmp target then os.replace'd into place.
+    # Two files copied, each to the final target path. Atomicity is
+    # now the copy_file's job — sync_tree no longer forces a .tmp sibling.
     assert len(calls) == 2
-    assert all(d.name.endswith(".tmp") for _, d in calls)
+    assert not any(d.name.endswith(".tmp") for _, d in calls)
     assert (dst / "a.txt").read_text() == "hello"
     assert (dst / "sub/b.txt").read_text() == "world"
 

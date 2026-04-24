@@ -202,9 +202,10 @@ def test_copy_file_is_used_by_every_hook(tree, install_adapter):
 
     assert run(settings, copy_file=spy) == 0
 
-    # Every copy target is a .tmp sibling (sync_tree's atomicity discipline).
+    # copy_file receives the final target path; atomicity is the
+    # copy_file's job, not sync_tree's.
     assert calls, "expected copy_file to be invoked at least once"
-    assert all(d.name.endswith(".tmp") for _, d in calls)
+    assert not any(d.name.endswith(".tmp") for _, d in calls)
 
     # Every hook that has work to do went through the spy. Checked by
     # destinations the copy targets land under.

@@ -6,6 +6,29 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.10] - 2026-04-24
+
+### Breaking
+
+- `copy_file` contract now owns atomicity. `sync_tree` calls
+  `copy_file(src, target)` directly instead of writing to a
+  library-owned `target.tmp` and then `os.replace`'ing. Callers whose
+  `copy_file` is a thin copy (e.g. `shutil.copy2`) need to do their
+  own tmp+rename to stay crash-safe — the default `_shutil_copy2`
+  wrapper does this. Callers whose `copy_file` is already atomic (S3
+  `put_object`, object-store SDK write) or whose remote is reached
+  via a network mount where `os.replace` itself drops with
+  `ConnectionAbortedError` can now publish `target` directly and skip
+  the tmp+rename dance.
+
+### Fixed
+
+- `sync_tree` no longer fails with `ConnectionAbortedError` on remote
+  filesystems whose `os.replace` is flaky. Previously the library
+  forced a tmp+rename on the destination filesystem even when the
+  caller's `copy_file` already provided durability; now the walk just
+  hands `copy_file` the final `target` path.
+
 ## [0.2.9] - 2026-04-23
 
 ### Breaking

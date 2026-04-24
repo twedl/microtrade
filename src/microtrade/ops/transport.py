@@ -16,14 +16,19 @@ The five hooks are ordered around a single ``run()``:
 Each hook is a real implementation here — not a stub. Callers don't
 override the hooks themselves; instead they inject a single per-file
 ``copy_file`` primitive via ``run(..., copy_file=...)`` which threads
-all the way through ``sync_tree``. The library owns the tree walk, the
-skip-if-unchanged check, and atomic ``tmp`` + ``os.replace`` publish.
+all the way through ``sync_tree``. The library owns the tree walk and
+the skip-if-unchanged check; ``copy_file`` owns atomicity.
 
-``copy_file`` defaults to a thin ``shutil.copy2`` wrapper. Deployments
-without bulk primitives (``rsync`` / ``aws s3 sync`` / ``kubectl cp -r``)
-plug in their one-file-at-a-time transfer (a ``kubectl cp`` wrapper,
-an S3 ``put_object`` wrapper, etc.). It must preserve mtime or the
-skip check misfires and every file re-copies on the next run.
+``copy_file`` defaults to a thin ``shutil.copy2`` wrapper that writes
+to ``target.tmp`` and ``os.replace``'s it into place (crash-safe on
+local disk / mounted PV). Deployments whose remote is reached via a
+flaky network mount where ``os.replace`` itself drops — or an object
+store where ``put_object`` is already atomic — supply their own
+``copy_file`` that publishes ``dst`` directly and skip the
+tmp+rename dance. Contract: ``copy_file`` must publish ``dst``
+atomically (no half-written file visible to readers) and preserve
+mtime (or the size+mtime skip check misfires and every file
+re-copies on the next run).
 """
 
 import os
@@ -37,9 +42,16 @@ CopyFn = Callable[[Path, Path], None]
 
 
 def _shutil_copy2(src: Path, dst: Path) -> None:
-    # Thin wrapper that drops ``shutil.copy2``'s return value so the
-    # default satisfies ``CopyFn``'s ``-> None`` signature.
-    shutil.copy2(src, dst)
+    """Default ``CopyFn``: atomic ``shutil.copy2`` via ``.tmp`` + ``os.replace``.
+
+    Writes to a sibling ``dst.tmp`` and renames into place so an
+    interrupted copy never leaves a partially-written ``dst`` visible
+    to readers. ``shutil.copy2`` preserves mtime, which the skip check
+    in :func:`sync_tree` relies on.
+    """
+    tmp = dst.with_name(dst.name + ".tmp")
+    shutil.copy2(src, tmp)
+    os.replace(tmp, dst)
 
 
 def sync_tree(
@@ -52,16 +64,13 @@ def sync_tree(
     """Copy ``src`` -> ``dst`` recursively, skipping files already up to date.
 
     ``sync_tree`` owns the tree walk, the skip-if-unchanged check, and
-    atomicity (``target.tmp`` + ``os.replace``). The per-file transfer is
-    injected via ``copy_file`` so deployments without ``rsync`` or
-    ``aws s3 sync`` can plug in whatever single-file primitive they have
-    available (``kubectl cp``, an S3 ``put_object`` wrapper, etc.) without
-    rewriting the walk.
+    the ``target.parent`` mkdir. ``copy_file(src_file, dst_file)`` must:
 
-    ``copy_file(src_file, dst_file)`` must write ``src_file`` to ``dst_file``
-    and **preserve mtime** — otherwise the size+mtime skip check misfires
-    on the next run and every file is re-copied. ``shutil.copy2`` (the
-    default) does preserve mtime.
+    - publish ``dst_file`` atomically (no half-written file visible to
+      readers); the default wraps ``shutil.copy2`` in a ``.tmp`` +
+      ``os.replace``, which is right for local disk / mounted PV;
+    - preserve mtime, or the size+mtime skip check misfires on the
+      next run and every file is re-copied. ``shutil.copy2`` does.
 
     Missing source is a no-op (a fresh deployment has nothing to mirror).
     ``patterns`` filters by :py:meth:`pathlib.PurePath.match` against the
@@ -83,9 +92,7 @@ def sync_tree(
             if s.st_size == t.st_size and int(s.st_mtime) == int(t.st_mtime):
                 continue
         target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_name(target.name + ".tmp")
-        copy_file(p, tmp)
-        os.replace(tmp, target)
+        copy_file(p, target)
 
 
 def pull_manifests(settings: Settings, *, copy_file: CopyFn = _shutil_copy2) -> None:
