@@ -37,7 +37,9 @@ path routing and tree-walk / atomic-publish; the caller supplies only
 
 from __future__ import annotations
 
+import contextlib
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -162,19 +164,46 @@ def _write_raw_manifests(
         write_manifest(settings.raw_manifests_dir, raw.name, manifest)
 
 
+def _bytes_sum(paths: list[Path]) -> int:
+    total = 0
+    for p in paths:
+        with contextlib.suppress(OSError):
+            total += p.stat().st_size
+    return total
+
+
 def _run_stage2(settings: Settings, cfg: ProjectConfig, mt_hash: str, copy_file: CopyFn) -> int:
     dirty = plan_stage2(settings, cfg, microtrade_hash=mt_hash)
     if not dirty:
         logger.info("stage 2: nothing to do")
         return 0
-    logger.info("stage 2: {} (trade_type, year) to process", len(dirty))
-    for key in sorted(dirty):
+    total_years = len(dirty)
+    logger.info("stage 2: {} (trade_type, year) to process", total_years)
+    stage_start = time.perf_counter()
+    rows_total = 0
+
+    for idx, key in enumerate(sorted(dirty), start=1):
+        remote_raws = dirty[key]
+        size_mb = _bytes_sum(remote_raws) / (1024 * 1024)
+        logger.info(
+            "year {}/{}: {} year={} ({} raw(s), {:.1f} MiB)",
+            idx,
+            total_years,
+            key.trade_type,
+            key.year,
+            len(remote_raws),
+            size_mb,
+        )
+
+        t0 = time.perf_counter()
         try:
-            local_raws = pull_raws_for_year(settings, dirty[key], copy_file=copy_file)
+            local_raws = pull_raws_for_year(settings, remote_raws, copy_file=copy_file)
         except Exception:
             logger.exception("pull_raws_for_year failed for {}; aborting stage 2", key)
             return 1
+        logger.info("  pulled in {:.1f}s", time.perf_counter() - t0)
 
+        t0 = time.perf_counter()
         try:
             summary = ingest_year(
                 trade_type=key.trade_type,
@@ -193,7 +222,16 @@ def _run_stage2(settings: Settings, cfg: ProjectConfig, mt_hash: str, copy_file:
             # Safe to delete local raws — next run re-pulls from remote.
             cleanup_local_raws(settings)
             return 1
+        rows_total += summary.total_rows
+        logger.info(
+            "  ingested in {:.1f}s: {} partition(s), {:,} rows, {:,} skipped",
+            time.perf_counter() - t0,
+            summary.ok_count,
+            summary.total_rows,
+            summary.total_skipped,
+        )
 
+        t0 = time.perf_counter()
         try:
             push_processed(settings, [_year_output_dir(settings, key)], copy_file=copy_file)
         except Exception:
@@ -202,10 +240,17 @@ def _run_stage2(settings: Settings, cfg: ProjectConfig, mt_hash: str, copy_file:
                 "stage 2 push failed for {}; keeping local parquet, aborting stage 2", key
             )
             return 1
+        logger.info("  pushed in {:.1f}s", time.perf_counter() - t0)
 
         _write_raw_manifests(settings, cfg, local_raws, mt_hash)
         cleanup_local_year(settings, key)
 
+    logger.info(
+        "stage 2 done: {} year(s), {:,} rows in {:.1f}s",
+        total_years,
+        rows_total,
+        time.perf_counter() - stage_start,
+    )
     return 0
 
 
@@ -228,24 +273,42 @@ def run(settings: Settings, *, copy_file: CopyFn = _shutil_copy2) -> int:
     wrapper (local disk / mounted PV). Swap in a ``kubectl cp`` /
     S3 ``put_object`` / etc. wrapper if the default can't reach your
     remote.
+
+    If ``settings.log_file`` is set, a loguru file sink is added for
+    the duration of this run alongside the default stderr sink. The
+    sink is removed on return so repeated ``run()`` calls don't leak
+    handles.
     """
-    pull_manifests(settings, copy_file=copy_file)
-    mirror_upstream_raw(settings, copy_file=copy_file)
-    pull_workbooks(settings, copy_file=copy_file)
+    sink_id: int | None = None
+    if settings.log_file:
+        sink_id = logger.add(
+            settings.log_file,
+            rotation="10 MB",
+            retention=10,
+            enqueue=True,
+            backtrace=False,
+        )
+    try:
+        pull_manifests(settings, copy_file=copy_file)
+        mirror_upstream_raw(settings, copy_file=copy_file)
+        pull_workbooks(settings, copy_file=copy_file)
 
-    mt_hash = file_sha256(settings.microtrade_yaml)
-    cfg = mt_config.load_config(settings.microtrade_yaml)
-    stage1_failures = _run_stage1(settings, cfg, mt_hash)
-    stage2_failures = _run_stage2(settings, cfg, mt_hash, copy_file)
+        mt_hash = file_sha256(settings.microtrade_yaml)
+        cfg = mt_config.load_config(settings.microtrade_yaml)
+        stage1_failures = _run_stage1(settings, cfg, mt_hash)
+        stage2_failures = _run_stage2(settings, cfg, mt_hash, copy_file)
 
-    push_manifests(settings, copy_file=copy_file)
+        push_manifests(settings, copy_file=copy_file)
 
-    total = stage1_failures + stage2_failures
-    if total:
-        logger.error("run completed with {} failure(s)", total)
-        return 1
-    logger.info("run completed cleanly")
-    return 0
+        total = stage1_failures + stage2_failures
+        if total:
+            logger.error("run completed with {} failure(s)", total)
+            return 1
+        logger.info("run completed cleanly")
+        return 0
+    finally:
+        if sink_id is not None:
+            logger.remove(sink_id)
 
 
 def main(config_path: Path = Path("config.yaml")) -> None:

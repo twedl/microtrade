@@ -65,3 +65,17 @@ def test_encoding_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("MT_ENCODING", "latin-1")
     cfg = load_settings(yaml_path)
     assert cfg.encoding == "latin-1"
+
+
+def test_log_file_defaults_to_none(tmp_path: Path) -> None:
+    yaml_path = tmp_path / "config.yaml"
+    yaml_path.write_text(FIXTURE_YAML)
+    cfg = load_settings(yaml_path)
+    assert cfg.log_file is None
+
+
+def test_log_file_from_yaml(tmp_path: Path) -> None:
+    yaml_path = tmp_path / "config.yaml"
+    yaml_path.write_text(FIXTURE_YAML + "log_file: /var/log/mt.log\n")
+    cfg = load_settings(yaml_path)
+    assert cfg.log_file == "/var/log/mt.log"

@@ -21,6 +21,8 @@ def _drop_raw(settings, name: str, content: bytes = b"raw") -> Path:
 class FakeSummary:
     failed_count: int = 0
     ok_count: int = 0
+    total_rows: int = 0
+    total_skipped: int = 0
 
 
 class FakeAdapter:
@@ -284,6 +286,33 @@ def test_push_failure_aborts_stage_2_retains_local_parquet(tree, install_adapter
     # year never ran).
     assert read_manifest(settings.raw_manifests_dir, a.name, RawManifest) is None
     assert read_manifest(settings.raw_manifests_dir, b.name, RawManifest) is None
+
+
+def test_log_file_sink_writes_and_cleans_up(tree, install_adapter, tmp_path):
+    """settings.log_file adds a loguru sink for the run and removes it on exit,
+    so repeated run() calls don't leak handles or duplicate lines."""
+    import dataclasses
+
+    from loguru import logger
+
+    settings, root = tree
+    (root / "workbooks" / "wb2020.xls").write_bytes(b"wb")
+    _drop_raw(settings, "S1_202001N.TXT.zip")
+
+    log_path = tmp_path / "ops.log"
+    settings = dataclasses.replace(settings, log_file=str(log_path))
+
+    install_adapter(FakeAdapter())
+    sinks_before = set(logger._core.handlers)  # type: ignore[attr-defined]
+    assert run(settings) == 0
+    sinks_after = set(logger._core.handlers)  # type: ignore[attr-defined]
+
+    # The run wrote to the file.
+    assert log_path.exists()
+    content = log_path.read_text()
+    assert "stage 2" in content or "run completed" in content
+    # Sink was removed — no handler leak across runs.
+    assert sinks_before == sinks_after
 
 
 def test_encoding_threads_through_to_ingest_year(tree, install_adapter, monkeypatch):

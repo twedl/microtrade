@@ -136,6 +136,9 @@ manifests_remote_dir: remote shared root for spec + raw manifests
 encoding: FWF text codec, default "utf-8" (optional; use cp1252 /
   latin-1 for Statistics Canada bilingual drops with non-ASCII
   bytes like 0xC9)
+log_file: path to a loguru sink file (optional, default None).
+  When set, run() adds a 10 MB-rotation file sink alongside the
+  default stderr sink for the run's duration.
 ```
 
 ## State tracking

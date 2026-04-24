@@ -37,6 +37,10 @@ class Settings:
     # drops are often Windows-1252 / Latin-1 (e.g. "É" = 0xC9), so
     # surface this as config. Matches ``PipelineConfig.encoding``.
     encoding: str = "utf-8"
+    # Optional path to a loguru sink file. When set, ``run()`` adds a
+    # file sink alongside the default stderr sink so runs leave an
+    # on-disk trail without the caller having to configure loguru.
+    log_file: str | None = None
 
 
 def load_settings(yaml_path: Path) -> Settings:
