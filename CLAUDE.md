@@ -285,22 +285,26 @@ disk / mounted PV). The target deployment has no `rsync`, no
 what's available is some way to move one file at a time (per-file
 `kubectl cp`, S3 `put_object`, etc.), which slots in as the
 `copy_file` kwarg. `microtrade.ops.transport.sync_tree` owns the
-tree walk, the skip-if-unchanged check (size + truncated mtime), and
-the `target.parent` mkdir; every hook calls it and threads
-`copy_file` through.
+tree walk, the skip-if-unchanged check, and the `target.parent`
+mkdir; every hook calls it and threads `copy_file` through. Skip
+rule is rsync's `--update` semantic: same size AND target mtime ≥
+source mtime (truncated to whole seconds — sub-second mtime isn't
+portable across every filesystem). This tolerates `copy_file`s that
+don't preserve mtime (e.g. `mc cp` without `--preserve`) — after a
+fresh copy the target's mtime is "now", still ≥ source, so the next
+run skips. The hole is an upstream rollback with identical size and
+an older mtime, which this doesn't detect.
 
-Contract: `copy_file` must (1) publish `dst` atomically — readers
-must never see a half-written file at `dst` — and (2) preserve
-mtime, otherwise the skip check misfires and every file re-copies on
-the next run. Atomicity is the `copy_file`'s concern, not the
-library's: deployments whose remote is reached via a flaky network
-mount (where `os.replace` itself drops with `ConnectionAbortedError`)
-or via an object store with already-atomic `put_object` are free to
-write `dst` directly and skip the tmp+rename dance. Path layout
-comes from `Settings` (and thus from `config.yaml`) —
-`upstream_raw_dir`, `raw_remote_dir`, `processed_remote_dir`,
-`manifests_remote_dir`. Change where things land by editing config,
-not by overriding hooks.
+Contract: `copy_file` must publish `dst` atomically — readers must
+never see a half-written file at `dst`. Atomicity is the
+`copy_file`'s concern, not the library's: deployments whose remote
+is reached via a flaky network mount (where `os.replace` itself
+drops with `ConnectionAbortedError`) or via an object store with
+already-atomic `put_object` are free to write `dst` directly and
+skip the tmp+rename dance. Path layout comes from `Settings` (and
+thus from `config.yaml`) — `upstream_raw_dir`, `raw_remote_dir`,
+`processed_remote_dir`, `manifests_remote_dir`. Change where things
+land by editing config, not by overriding hooks.
 
 ## Pipeline entry point
 

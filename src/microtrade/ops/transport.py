@@ -26,9 +26,11 @@ flaky network mount where ``os.replace`` itself drops — or an object
 store where ``put_object`` is already atomic — supply their own
 ``copy_file`` that publishes ``dst`` directly and skip the
 tmp+rename dance. Contract: ``copy_file`` must publish ``dst``
-atomically (no half-written file visible to readers) and preserve
-mtime (or the size+mtime skip check misfires and every file
-re-copies on the next run).
+atomically (no half-written file visible to readers). ``sync_tree``'s
+skip check is rsync's ``--update`` rule (size match + target mtime ≥
+source mtime), so ``copy_file`` is not required to preserve mtime —
+a fresh copy leaves ``dst`` with "now" as its mtime, still ≥ source,
+which the next run reads as up-to-date.
 """
 
 import os
@@ -64,13 +66,19 @@ def sync_tree(
     """Copy ``src`` -> ``dst`` recursively, skipping files already up to date.
 
     ``sync_tree`` owns the tree walk, the skip-if-unchanged check, and
-    the ``target.parent`` mkdir. ``copy_file(src_file, dst_file)`` must:
+    the ``target.parent`` mkdir.
 
-    - publish ``dst_file`` atomically (no half-written file visible to
-      readers); the default wraps ``shutil.copy2`` in a ``.tmp`` +
-      ``os.replace``, which is right for local disk / mounted PV;
-    - preserve mtime, or the size+mtime skip check misfires on the
-      next run and every file is re-copied. ``shutil.copy2`` does.
+    Skip rule: sizes match and the target's mtime is at least as new as
+    the source's (rsync ``--update`` semantic). Works even when
+    ``copy_file`` doesn't preserve mtime — after a copy the target's
+    mtime is "now", still ≥ source, so the next run skips. The hole is
+    an upstream rollback with identical size and an older mtime, which
+    this doesn't detect.
+
+    ``copy_file(src_file, dst_file)`` must publish ``dst_file``
+    atomically — no half-written file visible to readers. The default
+    wraps ``shutil.copy2`` in a ``.tmp`` + ``os.replace``, which is
+    right for local disk / mounted PV.
 
     Missing source is a no-op (a fresh deployment has nothing to mirror).
     ``patterns`` filters by :py:meth:`pathlib.PurePath.match` against the
@@ -88,8 +96,12 @@ def sync_tree(
         if target.exists():
             s, t = p.stat(), target.stat()
             # Truncate to whole seconds: sub-second mtime isn't preserved
-            # across every filesystem (FAT, some network FS).
-            if s.st_size == t.st_size and int(s.st_mtime) == int(t.st_mtime):
+            # across every filesystem (FAT, some network FS). Skip when
+            # sizes match and the target is at least as new as the source
+            # (rsync --update semantic). Tolerates ``copy_file``s that
+            # don't preserve mtime — after a fresh copy the target's
+            # mtime is "now", still >= source, so we skip next run.
+            if s.st_size == t.st_size and int(t.st_mtime) >= int(s.st_mtime):
                 continue
         target.parent.mkdir(parents=True, exist_ok=True)
         copy_file(p, target)

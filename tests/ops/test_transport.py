@@ -68,6 +68,41 @@ def test_sync_tree_uses_injected_copy_file(tmp_path: Path) -> None:
     assert (dst / "sub/b.txt").read_text() == "world"
 
 
+def test_sync_tree_skips_when_target_newer_than_source(tmp_path: Path) -> None:
+    """rsync --update semantic: target at-or-newer than source → skip.
+
+    Models a ``copy_file`` that doesn't preserve mtime (e.g. ``mc cp``
+    without ``--preserve``): after a copy the target's mtime is "now",
+    which is newer than the source. The next run must not re-copy.
+    """
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    _write(src / "a.txt", "hello")
+    _write(dst / "a.txt", "hello")
+    os.utime(src / "a.txt", (1_700_000_000, 1_700_000_000))
+    os.utime(dst / "a.txt", (1_700_000_100, 1_700_000_100))  # 100s newer
+
+    calls: list[tuple[Path, Path]] = []
+
+    def spy(s: Path, d: Path) -> None:
+        calls.append((s, d))
+
+    sync_tree(src, dst, copy_file=spy)
+
+    assert calls == []  # target newer → no copy
+
+
+def test_sync_tree_copies_when_source_newer_than_target(tmp_path: Path) -> None:
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    _write(src / "a.txt", "v2")
+    _write(dst / "a.txt", "v2")
+    os.utime(src / "a.txt", (1_700_000_100, 1_700_000_100))  # source newer
+    os.utime(dst / "a.txt", (1_700_000_000, 1_700_000_000))
+
+    sync_tree(src, dst)
+
+    assert int((dst / "a.txt").stat().st_mtime) == 1_700_000_100
+
+
 def test_sync_tree_pattern_filters(tmp_path: Path) -> None:
     src, dst = tmp_path / "src", tmp_path / "dst"
     _write(src / "keep.zip", "z")

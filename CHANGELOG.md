@@ -6,6 +6,22 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.11] - 2026-04-24
+
+### Changed
+
+- `sync_tree`'s skip check is now rsync's `--update` rule: sizes
+  match **and** the target's mtime is at least as new as the source's
+  (previously: sizes match **and** mtimes are exactly equal to the
+  second). Tolerates `copy_file` implementations that don't preserve
+  mtime — after a fresh copy the target's mtime is "now", still ≥
+  source, so the next run skips instead of pointlessly re-copying.
+  Known hole: an upstream rollback with identical size and an older
+  mtime won't be detected; upstream YTD snapshots in this project
+  are monotonic, so this is safe in practice. `copy_file`
+  implementations are no longer required to preserve mtime — the
+  explicit contract is now atomicity only.
+
 ## [0.2.10] - 2026-04-24
 
 ### Breaking
