@@ -151,9 +151,7 @@ def _write_raw_manifests(
         write_manifest(settings.raw_manifests_dir, raw.name, manifest)
 
 
-def _run_stage2(
-    settings: Settings, cfg: ProjectConfig, mt_hash: str, copy_file: CopyFn
-) -> int:
+def _run_stage2(settings: Settings, cfg: ProjectConfig, mt_hash: str, copy_file: CopyFn) -> int:
     dirty = plan_stage2(settings, cfg, microtrade_hash=mt_hash)
     if not dirty:
         logger.info("stage 2: nothing to do")

@@ -6,7 +6,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.2.13] - 2026-04-24
+## [0.2.14] - 2026-04-24
+
+### Fixed
+
+- Restore `ruff format` cleanliness on stage 2 refactor. 0.2.13
+  failed CI at the lint-and-format step and never published; 0.2.14
+  is the same content, formatted.
+
+## [0.2.13] - 2026-04-24 (unpublished — CI lint failure)
 
 ### Changed
 

@@ -238,9 +238,7 @@ def test_copy_file_is_used_by_every_hook(tree, install_adapter):
     assert any(settings.raw_manifests_dir in d.parents for d in dsts)  # pull_manifests
 
 
-def test_push_failure_aborts_stage_2_retains_local_parquet(
-    tree, install_adapter, monkeypatch
-):
+def test_push_failure_aborts_stage_2_retains_local_parquet(tree, install_adapter, monkeypatch):
     """Fail-fast on push: stop processing later years, keep local parquet.
 
     Rationale: if push fails, continuing to other years would accumulate

@@ -63,9 +63,7 @@ def _mark_raw_clean(tree, raw: Path, *, trade_type: str, year: str, month: str, 
     write_manifest(settings.raw_manifests_dir, raw.name, m)
     # Match the post-push filesystem shape so plan_stage2's output-exists
     # check (now against the remote processed dir) treats this as clean.
-    year_dir = (
-        settings.processed_remote_dir / trade_type / f"year={year}" / f"month={month}"
-    )
+    year_dir = settings.processed_remote_dir / trade_type / f"year={year}" / f"month={month}"
     year_dir.mkdir(parents=True, exist_ok=True)
     (year_dir / "part-0.parquet").write_bytes(b"stub")
 
