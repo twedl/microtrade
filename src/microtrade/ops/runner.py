@@ -85,7 +85,13 @@ def import_spec(workbook: Path, microtrade_yaml: Path, specs_out: Path) -> list[
 
 
 def ingest_year(
-    trade_type: str, year: int, raw_dir: Path, specs_dir: Path, out_dir: Path
+    trade_type: str,
+    year: int,
+    raw_dir: Path,
+    specs_dir: Path,
+    out_dir: Path,
+    *,
+    encoding: str = "utf-8",
 ) -> RunSummary:
     """Default stage 2 impl: one ``(trade_type, year)`` through microtrade.pipeline.run.
 
@@ -99,6 +105,7 @@ def ingest_year(
         year=year,
         ytd=False,
         show_progress=False,
+        encoding=encoding,
     )
     return _mt_run(cfg)
 
@@ -173,6 +180,7 @@ def _run_stage2(settings: Settings, cfg: ProjectConfig, mt_hash: str, copy_file:
                 raw_dir=settings.raw_dir,
                 specs_dir=settings.specs_dir,
                 out_dir=settings.processed_dir,
+                encoding=settings.encoding,
             )
             if summary.failed_count > 0:
                 raise RuntimeError(

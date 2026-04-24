@@ -49,10 +49,7 @@ SHEET_TITLES: dict[str, str] = {
 
 def default_filename_pattern(sheet_title: str) -> str:
     """Synthetic filename pattern used by tests for a given sheet title."""
-    return (
-        f"^{re.escape(sheet_title)}"
-        r"_(?P<year>\d{4})(?P<month>\d{2})(?P<flag>[NC])\.TXT\.zip$"
-    )
+    return f"^{re.escape(sheet_title)}" r"_(?P<year>\d{4})(?P<month>\d{2})(?P<flag>[NC])\.TXT\.zip$"
 
 
 def input_filename(sheet_title: str, year: int, month: int, flag: str = "N") -> str:

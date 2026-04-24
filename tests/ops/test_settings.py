@@ -43,3 +43,25 @@ def test_missing_field_raises(tmp_path: Path) -> None:
     yaml_path.write_text("raw_dir: /data/raw\n")
     with pytest.raises(SettingsError, match="missing required field"):
         load_settings(yaml_path)
+
+
+def test_encoding_defaults_to_utf8(tmp_path: Path) -> None:
+    yaml_path = tmp_path / "config.yaml"
+    yaml_path.write_text(FIXTURE_YAML)
+    cfg = load_settings(yaml_path)
+    assert cfg.encoding == "utf-8"
+
+
+def test_encoding_from_yaml(tmp_path: Path) -> None:
+    yaml_path = tmp_path / "config.yaml"
+    yaml_path.write_text(FIXTURE_YAML + "encoding: cp1252\n")
+    cfg = load_settings(yaml_path)
+    assert cfg.encoding == "cp1252"
+
+
+def test_encoding_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    yaml_path = tmp_path / "config.yaml"
+    yaml_path.write_text(FIXTURE_YAML)
+    monkeypatch.setenv("MT_ENCODING", "latin-1")
+    cfg = load_settings(yaml_path)
+    assert cfg.encoding == "latin-1"

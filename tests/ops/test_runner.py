@@ -53,6 +53,8 @@ class FakeAdapter:
         raw_dir: Path,
         specs_dir: Path,
         out_dir: Path,
+        *,
+        encoding: str = "utf-8",
     ) -> FakeSummary:
         self.ingest_calls.append((trade_type, year, raw_dir, specs_dir, out_dir))
         if (trade_type, year) in self.ingest_fail_for:
@@ -275,6 +277,34 @@ def test_push_failure_aborts_stage_2_retains_local_parquet(tree, install_adapter
     assert read_manifest(settings.raw_manifests_dir, b.name, RawManifest) is None
 
 
+def test_encoding_threads_through_to_ingest_year(tree, install_adapter, monkeypatch):
+    """settings.encoding reaches ingest_year so per-deployment encodings
+    (cp1252 / latin-1 for Stats Canada bilingual drops) can be configured
+    without patching microtrade internals."""
+    import dataclasses
+
+    settings, root = tree
+    (root / "workbooks" / "wb2020.xls").write_bytes(b"wb")
+    _drop_raw(settings, "S1_202001N.TXT.zip")
+
+    # Override settings.encoding on the loaded fixture (load_settings doesn't
+    # set it from the tree fixture's minimal config.yaml).
+    settings = dataclasses.replace(settings, encoding="cp1252")
+
+    adapter = install_adapter(FakeAdapter())
+
+    seen_encoding: list[str] = []
+
+    def recording_ingest(**kwargs):
+        seen_encoding.append(kwargs["encoding"])
+        return adapter.ingest_year(**kwargs)
+
+    monkeypatch.setattr("microtrade.ops.runner.ingest_year", recording_ingest)
+
+    assert run(settings) == 0
+    assert seen_encoding == ["cp1252"]
+
+
 def test_per_year_pull_only_pulls_that_years_zips(tree, install_adapter, monkeypatch):
     """pull_raws_for_year filters by (trade_type, year) so local disk
     only ever holds one year's zips, not the whole archive."""
@@ -292,9 +322,9 @@ def test_per_year_pull_only_pulls_that_years_zips(tree, install_adapter, monkeyp
     adapter = install_adapter(FakeAdapter())
     original_ingest = adapter.ingest_year
 
-    def snooping_ingest(trade_type, year, raw_dir, specs_dir, out_dir):
+    def snooping_ingest(trade_type, year, raw_dir, specs_dir, out_dir, **kwargs):
         seen_raw_dir_contents.append({p.name for p in raw_dir.iterdir()})
-        return original_ingest(trade_type, year, raw_dir, specs_dir, out_dir)
+        return original_ingest(trade_type, year, raw_dir, specs_dir, out_dir, **kwargs)
 
     monkeypatch.setattr("microtrade.ops.runner.ingest_year", snooping_ingest)
 
