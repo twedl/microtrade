@@ -149,22 +149,31 @@ def test_rerun_is_noop(tree, install_adapter):
     assert a2.ingest_calls == []
 
 
-def test_year_failure_isolated_nonzero_exit(tree, install_adapter):
+def test_ingest_failure_fails_fast(tree, install_adapter):
+    """Any stage 2 ingest failure aborts the loop — later years are left
+    for the next run to replan. Rationale: systemic errors (encoding,
+    missing spec, schema drift) hit every year the same way, so
+    continuing past the first failure is wasted work."""
     settings, root = tree
     (root / "workbooks" / "wb2020.xls").write_bytes(b"wb")
     good = _drop_raw(settings, "S1_202001N.TXT.zip", b"g")
     bad = _drop_raw(settings, "S2_202003N.TXT.zip", b"b")
 
-    install_adapter(FakeAdapter(ingest_fail_for={("exports_us", 2020)}))
+    # Years are processed sorted by (trade_type, year); exports_us comes
+    # first. Failing it on ingest must skip imports entirely.
+    adapter = install_adapter(FakeAdapter(ingest_fail_for={("exports_us", 2020)}))
     assert run(settings) == 1
 
-    assert read_manifest(settings.raw_manifests_dir, good.name, RawManifest) is not None
+    # Only the first year attempted ingest.
+    ingest_keys = {(c[0], c[1]) for c in adapter.ingest_calls}
+    assert ingest_keys == {("exports_us", 2020)}
+
+    # No manifests written (failing year) and no second year was ingested.
+    assert read_manifest(settings.raw_manifests_dir, good.name, RawManifest) is None
     assert read_manifest(settings.raw_manifests_dir, bad.name, RawManifest) is None
-    # Good year published; bad year did not.
-    assert (settings.processed_remote_dir / "imports" / "year=2020").is_dir()
     assert not (settings.processed_remote_dir / "exports_us" / "year=2020").exists()
-    # Local raw_dir cleaned for both years — good via the success path,
-    # bad via the ingest-failure path (raws_only=True).
+    assert not (settings.processed_remote_dir / "imports" / "year=2020").exists()
+    # Local raw_dir cleaned via the ingest-failure path.
     assert not any(settings.raw_dir.iterdir())
 
 

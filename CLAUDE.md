@@ -300,16 +300,18 @@ copy.** For each dirty `(trade_type, year)`:
    for that year. Peak local disk is one year's worth of data, not
    the whole archive.
 
-Failure semantics:
+Failure semantics: **fail-fast on any stage 2 failure.** Systemic
+errors (encoding mismatch, missing spec, schema drift) hit every
+year identically, so continuing past the first failure is wasted
+work. Remaining dirty years are left for the next run, which
+replans them.
 
-- **Ingest failure**: isolated to that year. Local raws for the
-  failed year get deleted (re-pullable next run); later years
-  continue; run returns non-zero.
-- **Push failure**: fail-fast. Keep local parquet so the retry
-  doesn't re-ingest. Abort the stage 2 loop (continuing would
-  accumulate unpushed parquet across years, defeating the cycle).
-- `push_manifests` still runs at the end regardless of either
-  failure so partial progress reaches the remote.
+- **Pull / ingest failure**: delete local raws (safe — next run
+  re-pulls), abort stage 2.
+- **Push failure**: keep local parquet so the retry doesn't
+  re-ingest, abort stage 2.
+- `push_manifests` still runs at the end so any years that
+  completed before the failure publish their manifests.
 
 `plan_stage2` iterates `raw_remote_dir/current` (the permanent
 archive), not `raw_dir`, because local `raw_dir` is ephemeral under
@@ -366,10 +368,10 @@ land by editing config, not by overriding hooks.
    remote archive). For each dirty year in sorted order, runs the
    pull-ingest-push-cleanup cycle.
 7. Runs `push_manifests` to publish updated manifests.
-8. On ingest failure: log with `logger.exception`, delete local
-   raws for the year, continue with other years. On push failure:
-   log, keep local parquet, abort stage 2 early. Failed years have
-   no raw-manifest updates, so they replan next run.
+8. On any stage 2 failure: log with `logger.exception`, clean up
+   (delete local raws for pull/ingest failures; keep local parquet
+   for push failures), and abort stage 2 early. Remaining dirty
+   years have no raw-manifest updates, so they replan next run.
 
 ## Kubernetes deployment notes
 

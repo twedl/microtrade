@@ -10,14 +10,18 @@ Stage 1 regenerates spec YAMLs for dirty workbooks. Stage 2 processes
 each dirty ``(trade_type, year)`` in a pull-ingest-push-cleanup loop so
 local disk peak is one year's worth of data, not the whole archive.
 
-Failure semantics:
-- Ingest failure: isolate to that year — delete local raws (safe to
-  re-pull next run), skip manifest writes, continue to the next year.
-- Push failure: abort stage 2. Keep local parquet so the next run's
-  retry can publish without re-ingesting. Later dirty years are left
-  for subsequent runs.
-- Either failure causes ``run()`` to return non-zero.
-- ``push_manifests`` always runs so partial progress reaches the remote.
+Failure semantics: fail-fast on any stage 2 failure. Systemic errors
+(encoding mismatch, missing spec, schema drift) hit every year
+identically — there's no point ingesting 29 more years to learn
+the same thing. On any failure ``_run_stage2`` returns non-zero and
+leaves remaining dirty years for the next run, which replans them.
+
+- Pull / ingest failure: delete local raws (safe — next run
+  re-pulls), abort stage 2.
+- Push failure: keep local parquet so the next run's retry doesn't
+  re-ingest, abort stage 2.
+- ``push_manifests`` always runs at the end so partial progress (any
+  years that completed before the failure) reaches the remote.
 
 ``import_spec`` and ``ingest_year`` are module-level functions that the
 test suite replaces via ``monkeypatch.setattr`` (see
@@ -164,14 +168,12 @@ def _run_stage2(settings: Settings, cfg: ProjectConfig, mt_hash: str, copy_file:
         logger.info("stage 2: nothing to do")
         return 0
     logger.info("stage 2: {} (trade_type, year) to process", len(dirty))
-    failures = 0
     for key in sorted(dirty):
         try:
             local_raws = pull_raws_for_year(settings, dirty[key], copy_file=copy_file)
         except Exception:
-            logger.exception("pull_raws_for_year failed for {}", key)
-            failures += 1
-            continue
+            logger.exception("pull_raws_for_year failed for {}; aborting stage 2", key)
+            return 1
 
         try:
             summary = ingest_year(
@@ -187,10 +189,10 @@ def _run_stage2(settings: Settings, cfg: ProjectConfig, mt_hash: str, copy_file:
                     f"microtrade reported {summary.failed_count} partition failure(s)"
                 )
         except Exception:
-            logger.exception("stage 2 ingest failed for {}", key)
+            logger.exception("stage 2 ingest failed for {}; aborting stage 2", key)
+            # Safe to delete local raws — next run re-pulls from remote.
             cleanup_local_raws(settings)
-            failures += 1
-            continue
+            return 1
 
         try:
             push_processed(settings, [_year_output_dir(settings, key)], copy_file=copy_file)
@@ -199,12 +201,12 @@ def _run_stage2(settings: Settings, cfg: ProjectConfig, mt_hash: str, copy_file:
             logger.exception(
                 "stage 2 push failed for {}; keeping local parquet, aborting stage 2", key
             )
-            return failures + 1
+            return 1
 
         _write_raw_manifests(settings, cfg, local_raws, mt_hash)
         cleanup_local_year(settings, key)
 
-    return failures
+    return 0
 
 
 def run(settings: Settings, *, copy_file: CopyFn = _shutil_copy2) -> int:
