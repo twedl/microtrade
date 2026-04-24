@@ -6,6 +6,47 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.13] - 2026-04-24
+
+### Changed
+
+- Stage 2 is now a per-year pull-ingest-push-cleanup loop instead of
+  a bulk mirror. For each dirty `(trade_type, year)`: pull only that
+  year's zips into `raw_dir`, run microtrade, push parquet, then
+  delete both local raws and local parquet. Peak local disk is one
+  year's worth of data, not the whole archive. Previously the pod
+  pulled every zip upfront, which overwhelmed storage when running
+  from a clean slate against a multi-GB archive.
+- `plan_stage2` iterates `raw_remote_dir/current` (the permanent
+  archive) instead of `raw_dir` (now ephemeral under the cleanup
+  loop). The output-exists check runs against
+  `processed_remote_dir` for the same reason.
+- `plan_stage2` short-circuits the hash check with an mtime probe:
+  if the remote raw's mtime hasn't advanced past the manifest's
+  `processed_at`, the manifest is trusted and the hash compare is
+  skipped. Avoids re-hashing multi-GB zips on every run.
+
+### Breaking
+
+- `pull_raw` hook removed. Replaced by `pull_workbooks` (xls/xlsx
+  only, runs once upfront) and `pull_raws_for_year(settings, cfg,
+  key)` (zips only, runs inside the per-year loop). Callers who
+  previously called `pull_raw` directly need to migrate. Path
+  routing is still baked into the library; the DI seam is still a
+  single `copy_file` kwarg on `run()`.
+
+### Added
+
+- `cleanup_local_year(settings, cfg, key)` removes local raws and
+  (by default) local processed output for one year; called after
+  each successful push. `raws_only=True` variant preserves local
+  parquet and is used on ingest-failure paths where we still want
+  to free the raws.
+- Fail-fast-on-push semantics: a push failure aborts stage 2 and
+  keeps local parquet so the next run's retry can publish without
+  re-ingesting. Continuing after a push failure would accumulate
+  unpushed parquet across years and defeat the per-year cycle.
+
 ## [0.2.12] - 2026-04-24
 
 ### Fixed
