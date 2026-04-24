@@ -6,6 +6,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.16] - 2026-04-24
+
+### Changed
+
+- Stage 2 now fails fast on any year failure (pull, ingest, or
+  push) instead of isolating ingest failures and continuing to the
+  next year. Previously a systemic error (encoding mismatch,
+  missing spec, schema drift) would cause the loop to run and fail
+  all N years identically before exiting; now it exits after the
+  first failure. Remaining dirty years replan next run once the
+  root cause is fixed. Cleanup still runs on the failing year so
+  local disk doesn't accumulate state. Push-failure behaviour
+  unchanged (keep local parquet so retry doesn't re-ingest).
+
 ## [0.2.15] - 2026-04-24
 
 ### Added
