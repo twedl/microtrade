@@ -17,6 +17,13 @@ workbooks:
       S2:
         trade_type: exports_us
         filename_pattern: '^S2_(?P<year>\\d{4})(?P<month>\\d{2})(?P<flag>[NC])\\.TXT\\.zip$'
+  wb2024.xls:
+    workbook_id: WB2024
+    effective_from: 2024-01
+    sheets:
+      S1:
+        trade_type: imports
+        filename_pattern: '^S1_(?P<year>\\d{4})(?P<month>\\d{2})(?P<flag>[NC])\\.TXT\\.zip$'
 """
 
 

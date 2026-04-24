@@ -183,14 +183,26 @@ duplicate them.
 A workbook is dirty if:
 - no manifest exists, OR
 - `workbook_hash` differs from current file hash, OR
-- `microtrade_hash` differs from current `microtrade.yaml` hash.
+- `microtrade_hash` differs from current `microtrade.yaml` hash, OR
+- any path in the manifest's `specs_written` is missing on disk.
+
+Files in `workbooks_dir` not named in `microtrade.yaml`'s `workbooks`
+mapping are logged as a warning and skipped — config is the source of
+truth for what counts as a workbook, so stray files (e.g. raw zips
+that ended up in `workbooks_dir` because it shares a path with
+`raw_dir`) don't crash `import_spec`.
 
 ### Stage 2 — year ingest
 
 A raw file is dirty if:
 - no manifest exists, OR
 - `raw_hash` differs from current file hash, OR
-- `microtrade_hash` differs from current `microtrade.yaml` hash.
+- `microtrade_hash` differs from current `microtrade.yaml` hash, OR
+- `processed_dir/<trade_type>/year=<year>/` doesn't exist or is empty.
+
+The output-exists check catches reconfigured `processed_dir` paths and
+manually-deleted output, where raw manifests would otherwise claim
+"done" while the parquet is gone.
 
 If any raw file mapping to a given `(trade_type, year)` is dirty, the
 whole year is dirty for that trade type. Grouping key:

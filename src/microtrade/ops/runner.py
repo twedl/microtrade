@@ -92,8 +92,8 @@ def _year_output_dir(settings: Settings, key: YearKey) -> Path:
     return settings.processed_dir / key.trade_type / f"year={key.year}"
 
 
-def _run_stage1(settings: Settings, mt_hash: str) -> int:
-    dirty = plan_stage1(settings, microtrade_hash=mt_hash)
+def _run_stage1(settings: Settings, cfg: ProjectConfig, mt_hash: str) -> int:
+    dirty = plan_stage1(settings, cfg, microtrade_hash=mt_hash)
     if not dirty:
         logger.info("stage 1: nothing to do")
         return 0
@@ -181,9 +181,8 @@ def run(settings: Settings, *, copy_file: CopyFn = _shutil_copy2) -> int:
     pull_raw(settings, copy_file=copy_file)
 
     mt_hash = file_sha256(settings.microtrade_yaml)
-    stage1_failures = _run_stage1(settings, mt_hash)
-
     cfg = mt_config.load_config(settings.microtrade_yaml)
+    stage1_failures = _run_stage1(settings, cfg, mt_hash)
     stage2_failures = _run_stage2(settings, cfg, mt_hash, copy_file)
 
     push_manifests(settings, copy_file=copy_file)

@@ -149,8 +149,8 @@ def test_year_failure_isolated_nonzero_exit(tree, install_adapter):
 
 def test_stage1_failure_isolated_nonzero_exit(tree, install_adapter):
     settings, root = tree
-    good_wb = root / "workbooks" / "good.xls"
-    bad_wb = root / "workbooks" / "bad.xls"
+    good_wb = root / "workbooks" / "wb2020.xls"
+    bad_wb = root / "workbooks" / "wb2024.xls"
     good_wb.write_bytes(b"g")
     bad_wb.write_bytes(b"b")
 

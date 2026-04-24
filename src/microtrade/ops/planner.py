@@ -75,20 +75,57 @@ def match_raw(filename: str, cfg: ProjectConfig) -> Match | None:
     return None
 
 
-def plan_stage1(settings: Settings, *, microtrade_hash: str | None = None) -> list[Path]:
+def plan_stage1(
+    settings: Settings,
+    cfg: ProjectConfig,
+    *,
+    microtrade_hash: str | None = None,
+) -> list[Path]:
+    """Return workbooks listed in ``cfg`` that need spec regeneration.
+
+    Files in ``workbooks_dir`` not named in ``cfg.workbooks`` are
+    ignored — config is the source of truth for what counts as a
+    workbook. This keeps stray files (e.g. raw zips accidentally
+    pulled into ``workbooks_dir``, or unknown xlsx) from crashing
+    stage 1 when ``import_spec`` looks them up.
+
+    A workbook is also dirty if any path in the manifest's
+    ``specs_written`` no longer exists on disk. Reason: renaming
+    ``specs_dir`` (or deleting specs manually) would otherwise leave
+    the manifest claiming "done at hash H" while stage 2's
+    ``discover.scan`` finds no specs to match against, producing a
+    silent no-op run.
+    """
     mt_hash = microtrade_hash or file_sha256(settings.microtrade_yaml)
     dirty: list[Path] = []
     for wb in sorted(settings.workbooks_dir.iterdir()):
         if not wb.is_file():
+            continue
+        if wb.name not in cfg.workbooks:
+            logger.warning("workbook not in microtrade.yaml, skipping: {}", wb.name)
             continue
         manifest = read_manifest(settings.spec_manifests_dir, wb.name, SpecManifest)
         if (
             manifest is None
             or manifest.microtrade_hash != mt_hash
             or manifest.workbook_hash != file_sha256(wb)
+            or not all(p.exists() for p in manifest.specs_written)
         ):
             dirty.append(wb)
     return dirty
+
+
+def _year_output_present(settings: Settings, key: YearKey) -> bool:
+    """True if the processed year dir exists and is non-empty.
+
+    Checks ``processed_dir/<trade_type>/year=<year>/``. Guards against
+    the case where ``processed_dir`` was reconfigured (or the output
+    was deleted) after a prior successful run — without this, raw
+    manifests would claim "done" while the parquet output is missing,
+    and stage 2 would run as a silent no-op.
+    """
+    year_dir = settings.processed_dir / key.trade_type / f"year={key.year}"
+    return year_dir.is_dir() and any(year_dir.iterdir())
 
 
 def plan_stage2(
@@ -122,6 +159,7 @@ def plan_stage2(
             manifest is None
             or manifest.microtrade_hash != mt_hash
             or manifest.raw_hash != file_sha256(raw)
+            or not _year_output_present(settings, key)
         ):
             dirty_keys.add(key)
 
