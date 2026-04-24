@@ -6,6 +6,19 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.15] - 2026-04-24
+
+### Added
+
+- `Settings.encoding` (new optional field, default `"utf-8"`,
+  configurable via `config.yaml` or `MT_ENCODING` env var). Threaded
+  through `ingest_year` into `PipelineConfig.encoding` so per-file
+  FWF reads honour the declared codec. Statistics Canada drops are
+  often Windows-1252 / Latin-1 (non-ASCII bytes like `0xC9` = `É`);
+  before this the ops runner hardcoded UTF-8 and every such file
+  crashed with `UnicodeDecodeError`. Users on non-UTF-8 data can now
+  set `encoding: cp1252` (or `latin-1`) in `config.yaml`.
+
 ## [0.2.14] - 2026-04-24
 
 ### Fixed
