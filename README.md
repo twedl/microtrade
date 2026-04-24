@@ -306,8 +306,28 @@ needing to share the rest of the PV.
 
 A `transport` seam wraps the ordering contract:
 
+```mermaid
+sequenceDiagram
+    participant U as upstream
+    participant R as remote
+    participant L as local (pod)
+
+    R->>L: pull_manifests
+    U->>R: mirror
+    R->>L: pull_raw  (zip → raw_dir, xls → workbooks_dir)
+    Note over L: Process (see below)
+    L->>R: push_processed  (per year)
+    L->>R: push_manifests
 ```
-pull_manifests → mirror → pull → stage 1 → stage 2 (push per year) → push_manifests
+
+Inside the `Process` step, pod-local data flows through two stages:
+
+```mermaid
+flowchart TB
+    WB[workbooks_dir<br/>*.xls*] -->|stage 1<br/>import_spec| SP[specs_dir<br/>v&lt;effective&gt;.yaml]
+    RD[raw_dir<br/>*.zip] --> ST2{{stage 2<br/>ingest_year}}
+    SP --> ST2
+    ST2 --> PD[processed_dir<br/>year=YYYY/month=MM/<br/>part-N.parquet]
 ```
 
 `pull_manifests` fetches the shared dirty-check state *before* planning
