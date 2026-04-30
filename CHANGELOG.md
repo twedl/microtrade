@@ -6,6 +6,19 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.18] - 2026-04-30
+
+### Changed
+
+- Multi-member raw zips are now supported. When a raw zip contains
+  more than one file, the data member is selected by name: zip
+  ``X.zip`` must contain a member named ``X`` (i.e. the zip's name
+  with ``.zip`` stripped). Auxiliary metadata/log files alongside
+  are ignored. Single-member zips behave as before. Multi-member
+  zips with no matching member raise a clear `IngestError` listing
+  the inner filenames. Affects both `microtrade ingest` (via the
+  pipeline) and `microtrade inspect`.
+
 ## [0.2.17] - 2026-04-24
 
 ### Added
