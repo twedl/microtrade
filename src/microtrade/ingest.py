@@ -25,6 +25,7 @@ from typing import IO
 
 import pyarrow as pa
 
+from microtrade import _zip_deflate64  # noqa: F401  patches zipfile for deflate64
 from microtrade.discover import RawInput
 from microtrade.schema import Column, ComputedColumn, Spec
 
