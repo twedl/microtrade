@@ -6,6 +6,19 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.19] - 2026-04-30
+
+### Changed
+
+- Multi-member raw zip selection is now largest-wins instead of
+  exact-name-match. The data file in trade microdata zips is always
+  orders of magnitude larger than auxiliary metadata/log/manifest
+  files, so picking the largest member is unambiguous and handles
+  naming variations the name-match rule didn't cover (different
+  case, missing or different extension between outer and inner,
+  arbitrary inner names). Single-member and empty-zip behaviour is
+  unchanged.
+
 ## [0.2.18] - 2026-04-30
 
 ### Changed
