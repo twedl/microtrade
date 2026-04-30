@@ -50,32 +50,19 @@ class IngestError(RuntimeError):
 
 
 def _select_data_member(zf: zipfile.ZipFile, zip_path: Path) -> zipfile.ZipInfo:
-    """Pick the data file from a possibly-multi-member zip.
+    """Pick the largest non-directory member of a raw zip.
 
-    Convention: ``X.zip`` contains the data as ``X`` alongside any
-    auxiliary metadata/log files. So:
-
-    - empty zip -> raise
-    - exactly one non-directory member -> use it
-    - multiple members, exactly one named ``zip_path.name`` minus
-      ``.zip`` -> use it (auxiliary members are ignored)
-    - otherwise -> raise with the inner filename list so the user can
-      see what was in the zip
+    Trade microdata zips ship the FWF payload (10s of MB to multiple
+    GB) alongside small auxiliary metadata/log/manifest files (KB).
+    Largest-wins is unambiguous across naming variations (different
+    case, missing or different extension between outer and inner) and
+    needs no configuration. Single-member zips fall out of this rule
+    naturally.
     """
     members = [m for m in zf.infolist() if not m.is_dir()]
     if not members:
         raise IngestError(f"{zip_path.name}: zip is empty")
-    if len(members) == 1:
-        return members[0]
-    expected = zip_path.name.removesuffix(".zip")
-    matching = [m for m in members if m.filename == expected]
-    if len(matching) == 1:
-        return matching[0]
-    names = [m.filename for m in members]
-    raise IngestError(
-        f"{zip_path.name}: cannot select data file from multi-member zip; "
-        f"expected one matching {expected!r}, found {names}"
-    )
+    return max(members, key=lambda m: m.file_size)
 
 
 class _CastError(ValueError):

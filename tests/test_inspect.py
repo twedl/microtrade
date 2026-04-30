@@ -172,17 +172,23 @@ def test_inspect_rejects_malformed_period_override(inspect_env) -> None:
     assert "period" in result.output.lower()
 
 
-def test_inspect_rejects_zip_with_no_data_member(inspect_env, tmp_path: Path) -> None:
-    """Multi-member zip where no inner name matches the conventional
-    ``<zip_name without .zip>`` -> clear error, exit 2."""
-    bad_zip = tmp_path / "ImportsSheet_202401N.TXT.zip"
-    with zipfile.ZipFile(bad_zip, "w") as zf:
-        zf.writestr("a.fwf", "first\n")
-        zf.writestr("b.fwf", "second\n")
+def test_inspect_picks_largest_member_in_multi_member_zip(inspect_env, tmp_path: Path) -> None:
+    """``microtrade inspect`` follows the same largest-wins rule as
+    ingest, so users can poke at multi-member zips during debugging."""
+    multi_zip = tmp_path / "ImportsSheet_202401N.TXT.zip"
+    # Read the working single-member zip's content so the synthetic
+    # multi-member zip stays parseable end-to-end.
+    src_data = zipfile.ZipFile(inspect_env["zip"]).read(
+        zipfile.ZipFile(inspect_env["zip"]).namelist()[0]
+    )
+    with zipfile.ZipFile(multi_zip, "w") as zf:
+        zf.writestr("manifest.json", "{}\n")
+        zf.writestr("delivery.log", "tiny\n")
+        zf.writestr("ImportsSheet_202401N.txt", src_data)  # largest
 
-    result = _invoke(["inspect", str(bad_zip), "--spec-dir", str(inspect_env["spec"])])
-    assert result.exit_code == 2
-    assert "cannot select data file" in result.output
+    result = _invoke(["inspect", str(multi_zip), "--spec-dir", str(inspect_env["spec"])])
+    assert result.exit_code == 0, result.output
+    assert "line 1" in result.output
 
 
 def test_inspect_rows_zero_prints_spec_only(inspect_env) -> None:
