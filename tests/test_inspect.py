@@ -172,7 +172,9 @@ def test_inspect_rejects_malformed_period_override(inspect_env) -> None:
     assert "period" in result.output.lower()
 
 
-def test_inspect_rejects_zip_with_multiple_members(inspect_env, tmp_path: Path) -> None:
+def test_inspect_rejects_zip_with_no_data_member(inspect_env, tmp_path: Path) -> None:
+    """Multi-member zip where no inner name matches the conventional
+    ``<zip_name without .zip>`` -> clear error, exit 2."""
     bad_zip = tmp_path / "ImportsSheet_202401N.TXT.zip"
     with zipfile.ZipFile(bad_zip, "w") as zf:
         zf.writestr("a.fwf", "first\n")
@@ -180,7 +182,7 @@ def test_inspect_rejects_zip_with_multiple_members(inspect_env, tmp_path: Path) 
 
     result = _invoke(["inspect", str(bad_zip), "--spec-dir", str(inspect_env["spec"])])
     assert result.exit_code == 2
-    assert "exactly one inner file" in result.output
+    assert "cannot select data file" in result.output
 
 
 def test_inspect_rows_zero_prints_spec_only(inspect_env) -> None:

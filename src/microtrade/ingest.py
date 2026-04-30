@@ -20,6 +20,7 @@ import zipfile
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import date, datetime
+from pathlib import Path
 from typing import IO
 
 import pyarrow as pa
@@ -46,6 +47,35 @@ _DATE_FORMATS: dict[str, str] = {
 
 class IngestError(RuntimeError):
     """Raised when a raw file is structurally incompatible with its spec."""
+
+
+def _select_data_member(zf: zipfile.ZipFile, zip_path: Path) -> zipfile.ZipInfo:
+    """Pick the data file from a possibly-multi-member zip.
+
+    Convention: ``X.zip`` contains the data as ``X`` alongside any
+    auxiliary metadata/log files. So:
+
+    - empty zip -> raise
+    - exactly one non-directory member -> use it
+    - multiple members, exactly one named ``zip_path.name`` minus
+      ``.zip`` -> use it (auxiliary members are ignored)
+    - otherwise -> raise with the inner filename list so the user can
+      see what was in the zip
+    """
+    members = [m for m in zf.infolist() if not m.is_dir()]
+    if not members:
+        raise IngestError(f"{zip_path.name}: zip is empty")
+    if len(members) == 1:
+        return members[0]
+    expected = zip_path.name.removesuffix(".zip")
+    matching = [m for m in members if m.filename == expected]
+    if len(matching) == 1:
+        return matching[0]
+    names = [m.filename for m in members]
+    raise IngestError(
+        f"{zip_path.name}: cannot select data file from multi-member zip; "
+        f"expected one matching {expected!r}, found {names}"
+    )
 
 
 class _CastError(ValueError):
@@ -132,11 +162,7 @@ def iter_record_batches(
     arrow_schema = build_arrow_schema(spec)
 
     with zipfile.ZipFile(raw.path) as zf:
-        members = [info for info in zf.infolist() if not info.is_dir()]
-        if len(members) != 1:
-            names = [m.filename for m in members]
-            raise IngestError(f"{raw.path.name}: expected exactly one inner file, found {names}")
-        member = members[0]
+        member = _select_data_member(zf, raw.path)
         with zf.open(member) as binstream:
             yield from _stream_lines(
                 binstream,

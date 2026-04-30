@@ -20,7 +20,7 @@ from typing import IO
 import typer
 
 from microtrade import __version__, config, discover, excel_spec, pipeline, schema
-from microtrade.ingest import DEFAULT_CHUNK_ROWS
+from microtrade.ingest import DEFAULT_CHUNK_ROWS, IngestError, _select_data_member
 
 app = typer.Typer(
     name="microtrade",
@@ -401,15 +401,12 @@ def _iter_inspect_lines(path: Path, *, encoding: str, limit: int) -> Iterator[tu
     try:
         if is_zip:
             with zipfile.ZipFile(path) as zf:
-                members = [m for m in zf.infolist() if not m.is_dir()]
-                if len(members) != 1:
-                    typer.echo(
-                        f"{path.name}: expected exactly one inner file, found "
-                        f"{[m.filename for m in members]}",
-                        err=True,
-                    )
-                    raise typer.Exit(code=2)
-                with zf.open(members[0]) as binstream:
+                try:
+                    member = _select_data_member(zf, path)
+                except IngestError as exc:
+                    typer.echo(str(exc), err=True)
+                    raise typer.Exit(code=2) from exc
+                with zf.open(member) as binstream:
                     yield from _first_lines(binstream, encoding=encoding, limit=limit)
             return
         with path.open("rb") as binstream:

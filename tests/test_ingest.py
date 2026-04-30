@@ -143,17 +143,38 @@ def test_ingest_rejects_record_longer_than_record_length(imports_spec, tmp_path:
         list(iter_record_batches(raw, imports_spec, chunk_rows=100))
 
 
-def test_ingest_rejects_zip_with_multiple_members(imports_spec, tmp_path: Path) -> None:
+def test_ingest_picks_data_member_in_multi_member_zip(imports_spec, tmp_path: Path) -> None:
+    """Convention: ``X.zip`` contains data as ``X`` plus optional aux files;
+    pick the matching member, ignore metadata/log siblings."""
     import zipfile
 
-    zip_path = tmp_path / "imports_202404.zip"
+    zip_path = tmp_path / "imports_202404.TXT.zip"
+    line = render_fwf_lines(imports_spec, n_rows=1, seed=0)[0]
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("imports_202404.TXT", line + "\n")  # the data member
+        zf.writestr("imports_202404.log", "delivery notes\n")
+        zf.writestr("metadata.json", "{}\n")
+    raw = RawInput("imports", 2024, 4, zip_path)
+
+    batches = list(iter_record_batches(raw, imports_spec, chunk_rows=100))
+    assert sum(b.num_rows for b in batches) == 1
+
+
+def test_ingest_rejects_multi_member_zip_without_matching_member(
+    imports_spec, tmp_path: Path
+) -> None:
+    """Multi-member zip with no member matching the convention raises
+    a clear error listing the inner names."""
+    import zipfile
+
+    zip_path = tmp_path / "imports_202404.TXT.zip"
     line = render_fwf_lines(imports_spec, n_rows=1, seed=0)[0]
     with zipfile.ZipFile(zip_path, "w") as zf:
         zf.writestr("a.fwf", line + "\n")
         zf.writestr("b.fwf", line + "\n")
     raw = RawInput("imports", 2024, 4, zip_path)
 
-    with pytest.raises(IngestError, match="exactly one inner file"):
+    with pytest.raises(IngestError, match="cannot select data file"):
         list(iter_record_batches(raw, imports_spec, chunk_rows=100))
 
 
