@@ -6,6 +6,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.20] - 2026-04-30
+
+### Added
+
+- Support for raw zips compressed with **Deflate64** (compress_type=9,
+  a 7-Zip / WinZip extension to deflate). CPython's stdlib `zipfile`
+  raises `NotImplementedError` on this method; the new
+  `microtrade._zip_deflate64` module patches `zipfile` to dispatch
+  compress_type=9 through a small adapter around the third-party
+  `inflate64` package (which ships cp313 manylinux wheels). Imported
+  for side effect by `microtrade.ingest`, so the patch is in effect
+  for every ingest call. The `inflate64` package is now a runtime
+  dependency.
+
 ## [0.2.19] - 2026-04-30
 
 ### Changed
