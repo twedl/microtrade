@@ -1,6 +1,6 @@
 [project]
 name = "microtrade-fwf"
-version = "0.2.22"
+version = "0.2.23"
 description = "Turn zipped fixed-width (FWF) trade microdata into Hive-partitioned Parquet datasets."
 readme = "README.md"
 license = { file = "LICENSE" }

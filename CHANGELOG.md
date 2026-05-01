@@ -6,6 +6,28 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.23] - 2026-05-01
+
+### Added
+
+- `SheetConfig.coerce_invalid_to_null: tuple[str, ...]` (new field
+  in `microtrade.yaml`). Lists physical-name columns that should
+  carry `Column.coerce_invalid_to_null=True` in the generated spec.
+  Configures the 0.2.22 ingest behaviour from the project YAML so
+  you don't have to hand-edit generated specs after `import-spec`.
+  Each named column must end up nullable; misuse raises a
+  `SpecError` at import-spec time.
+- Per-partition `coerced_counts: dict[str, int]` recorded in the
+  microtrade per-run JSONL manifest at
+  `<processed_dir>/_manifests/<trade_type>/<run_id>.jsonl`. Tells
+  you exactly how many values were silenced per column, per source
+  file. Empty dict when the spec uses no `coerce_invalid_to_null`
+  flag, so existing manifests gain a tiny harmless field.
+- `RunSummary.total_coerced` aggregates across the run.
+- Stage 2's per-year ops log line now reports the coerced count
+  alongside rows / skipped:
+  `ingested in T.Ts: P partition(s), R rows, S skipped, C coerced`.
+
 ## [0.2.22] - 2026-05-01
 
 ### Added
