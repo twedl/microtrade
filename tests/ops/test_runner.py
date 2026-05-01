@@ -343,6 +343,47 @@ def test_encoding_threads_through_to_ingest_year(tree, install_adapter, monkeypa
     assert seen_encoding == ["cp1252"]
 
 
+def test_only_keys_restricts_stage_2_to_listed_years(tree, install_adapter):
+    """``run(only_keys=[...])`` restricts stage 2 to the listed years.
+
+    Used to debug a single failing year without re-processing the rest
+    of a large dirty plan."""
+    from microtrade.ops.planner import YearKey
+
+    settings, root = tree
+    (root / "workbooks" / "wb2020.xls").write_bytes(b"wb")
+    a = _drop_raw(settings, "S1_202001N.TXT.zip", b"a")
+    b = _drop_raw(settings, "S2_202003N.TXT.zip", b"b")
+
+    adapter = install_adapter(FakeAdapter())
+
+    # Only ingest one of the two dirty years.
+    assert run(settings, only_keys=[YearKey("imports", 2020)]) == 0
+
+    keys = {(c[0], c[1]) for c in adapter.ingest_calls}
+    assert keys == {("imports", 2020)}
+    assert read_manifest(settings.raw_manifests_dir, a.name, RawManifest) is not None
+    # The other dirty year was untouched — still no manifest, still ready
+    # for the next run.
+    assert read_manifest(settings.raw_manifests_dir, b.name, RawManifest) is None
+
+
+def test_only_keys_skips_non_dirty_year_with_warning(tree, install_adapter):
+    """A year passed in ``only_keys`` that isn't currently dirty is
+    skipped (no error, no work)."""
+    from microtrade.ops.planner import YearKey
+
+    settings, root = tree
+    (root / "workbooks" / "wb2020.xls").write_bytes(b"wb")
+    _drop_raw(settings, "S1_202001N.TXT.zip")  # only dirty year
+
+    adapter = install_adapter(FakeAdapter())
+
+    # Ask for a year that isn't dirty. Stage 2 ends up with nothing to do.
+    assert run(settings, only_keys=[YearKey("exports_us", 1999)]) == 0
+    assert adapter.ingest_calls == []
+
+
 def test_per_year_pull_only_pulls_that_years_zips(tree, install_adapter, monkeypatch):
     """pull_raws_for_year filters by (trade_type, year) so local disk
     only ever holds one year's zips, not the whole archive."""

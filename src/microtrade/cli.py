@@ -48,12 +48,37 @@ def ops_run(
         dir_okay=False,
         help="Path to the ops config.yaml (paths + dirs).",
     ),
+    only: list[str] = typer.Option(
+        [],
+        "--only",
+        help=(
+            "Restrict stage 2 to one or more 'trade_type/year' keys "
+            "(e.g. --only imports/2025 --only exports_us/2024). "
+            "Years not in the dirty plan are skipped with a warning; "
+            "remove their raw_manifest .json to force reprocess."
+        ),
+    ),
 ) -> None:
     """Drive a full ops run: stage 1 (spec generation) + stage 2 (year ingest)."""
+    from microtrade.ops.planner import YearKey
     from microtrade.ops.runner import run
     from microtrade.ops.settings import load_settings
 
-    raise typer.Exit(code=run(load_settings(config_path)))
+    only_keys: list[YearKey] | None = None
+    if only:
+        only_keys = []
+        for spec in only:
+            try:
+                tt, year_str = spec.split("/", 1)
+                only_keys.append(YearKey(trade_type=tt, year=int(year_str)))
+            except (ValueError, TypeError) as exc:
+                typer.echo(
+                    f"--only: expected 'trade_type/year', got {spec!r}: {exc}",
+                    err=True,
+                )
+                raise typer.Exit(code=2) from exc
+
+    raise typer.Exit(code=run(load_settings(config_path), only_keys=only_keys))
 
 
 @app.command()

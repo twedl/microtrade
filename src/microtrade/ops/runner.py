@@ -40,6 +40,7 @@ from __future__ import annotations
 import contextlib
 import sys
 import time
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -172,8 +173,31 @@ def _bytes_sum(paths: list[Path]) -> int:
     return total
 
 
-def _run_stage2(settings: Settings, cfg: ProjectConfig, mt_hash: str, copy_file: CopyFn) -> int:
+def _run_stage2(
+    settings: Settings,
+    cfg: ProjectConfig,
+    mt_hash: str,
+    copy_file: CopyFn,
+    *,
+    only_keys: frozenset[YearKey] | None = None,
+) -> int:
     dirty = plan_stage2(settings, cfg, microtrade_hash=mt_hash)
+    if only_keys is not None:
+        dropped = [k for k in dirty if k not in only_keys]
+        dirty = {k: v for k, v in dirty.items() if k in only_keys}
+        if dropped:
+            logger.info(
+                "stage 2: only_keys filter dropped {} dirty year(s): {}",
+                len(dropped),
+                sorted(dropped),
+            )
+        missing = [k for k in only_keys if k not in dirty]
+        if missing:
+            logger.warning(
+                "stage 2: only_keys requested {} not currently dirty (skipped); "
+                "remove their raw_manifest .json to force reprocess",
+                sorted(missing),
+            )
     if not dirty:
         logger.info("stage 2: nothing to do")
         return 0
@@ -254,7 +278,12 @@ def _run_stage2(settings: Settings, cfg: ProjectConfig, mt_hash: str, copy_file:
     return 0
 
 
-def run(settings: Settings, *, copy_file: CopyFn = _shutil_copy2) -> int:
+def run(
+    settings: Settings,
+    *,
+    copy_file: CopyFn = _shutil_copy2,
+    only_keys: Iterable[YearKey] | None = None,
+) -> int:
     """Drive one ops cycle.
 
     Ordering:
@@ -273,6 +302,13 @@ def run(settings: Settings, *, copy_file: CopyFn = _shutil_copy2) -> int:
     wrapper (local disk / mounted PV). Swap in a ``kubectl cp`` /
     S3 ``put_object`` / etc. wrapper if the default can't reach your
     remote.
+
+    ``only_keys`` restricts stage 2 to the listed ``(trade_type,
+    year)`` pairs (intersected with the dirty plan). Use this to
+    debug a single failing year without re-processing the others.
+    Years requested that aren't dirty are skipped with a warning —
+    delete their entry under ``raw_manifests_dir`` first if you
+    want to force reprocess.
 
     If ``settings.log_file`` is set, a loguru file sink is added for
     the duration of this run alongside the default stderr sink. The
@@ -296,7 +332,8 @@ def run(settings: Settings, *, copy_file: CopyFn = _shutil_copy2) -> int:
         mt_hash = file_sha256(settings.microtrade_yaml)
         cfg = mt_config.load_config(settings.microtrade_yaml)
         stage1_failures = _run_stage1(settings, cfg, mt_hash)
-        stage2_failures = _run_stage2(settings, cfg, mt_hash, copy_file)
+        only_set = frozenset(only_keys) if only_keys is not None else None
+        stage2_failures = _run_stage2(settings, cfg, mt_hash, copy_file, only_keys=only_set)
 
         push_manifests(settings, copy_file=copy_file)
 
