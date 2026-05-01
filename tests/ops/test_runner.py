@@ -23,6 +23,7 @@ class FakeSummary:
     ok_count: int = 0
     total_rows: int = 0
     total_skipped: int = 0
+    total_coerced: int = 0
 
 
 class FakeAdapter:

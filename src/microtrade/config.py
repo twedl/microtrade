@@ -101,6 +101,13 @@ class SheetConfig:
     # `computed` entry before disappearing. Names match `effective_name`
     # for FWF columns, `name` for computed columns.
     drop: tuple[str, ...] = ()
+    # Physical-name columns whose parser should write null when the value
+    # cannot be parsed (e.g. '00000000' for a Date column meaning "missing
+    # date"). Sets `Column.coerce_invalid_to_null=True` at import-spec
+    # time. Each named column must end up nullable in the resulting spec
+    # (workbook nullability or via `cast` is not enough — the column must
+    # not be flagged non-nullable); enforced at parser build time.
+    coerce_invalid_to_null: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         validate_filename_pattern(self.filename_pattern, error_cls=ConfigError)
@@ -141,6 +148,9 @@ class SheetConfig:
         drop_dupes = sorted({n for n, c in Counter(self.drop).items() if c > 1})
         if drop_dupes:
             raise ConfigError(f"drop lists duplicate name(s): {drop_dupes}")
+        coerce_dupes = sorted({n for n, c in Counter(self.coerce_invalid_to_null).items() if c > 1})
+        if coerce_dupes:
+            raise ConfigError(f"coerce_invalid_to_null lists duplicate name(s): {coerce_dupes}")
         object.__setattr__(self, "rename", MappingProxyType(dict(self.rename)))
         object.__setattr__(self, "cast", MappingProxyType(dict(self.cast)))
         object.__setattr__(self, "parse", MappingProxyType(dict(self.parse)))
@@ -243,6 +253,12 @@ def _sheet_from_dict(workbook_name: str, sheet_name: str, data: dict[str, Any]) 
         raise ConfigError(
             f"workbook {workbook_name!r} sheet {sheet_name!r}: 'drop' must be a list of strings"
         )
+    coerce_raw = data.get("coerce_invalid_to_null") or []
+    if not isinstance(coerce_raw, list) or not all(isinstance(s, str) for s in coerce_raw):
+        raise ConfigError(
+            f"workbook {workbook_name!r} sheet {sheet_name!r}: "
+            f"'coerce_invalid_to_null' must be a list of strings"
+        )
     routing_column = data.get("routing_column")
     return SheetConfig(
         filename_pattern=pattern,
@@ -253,6 +269,7 @@ def _sheet_from_dict(workbook_name: str, sheet_name: str, data: dict[str, Any]) 
         parse=parse,
         computed=computed,
         drop=tuple(drop_raw),
+        coerce_invalid_to_null=tuple(coerce_raw),
     )
 
 

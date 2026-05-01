@@ -677,6 +677,92 @@ def test_drop_removes_column_after_computed_uses_it(tmp_path: Path) -> None:
     assert sorted(df["entry_date"].to_list()) == [date(2024, 1, 15), date(2024, 3, 15)]
 
 
+def test_coerce_invalid_to_null_in_sheet_config(tmp_path: Path) -> None:
+    """``coerce_invalid_to_null:`` in the sheet config stamps the flag on
+    each named column at import-spec time and round-trips through YAML."""
+    import yaml as yaml_
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    wb.remove(wb.active)
+    ws = wb.create_sheet("ImportsSheet")
+    ws.append(["Position", "Description", "Length", "Type", "Nullable"])
+    ws.append([1, "period", 6, "Char", False])
+    ws.append([7, "entry_date", 8, "Char", True])
+    workbook_path = tmp_path / "wb.xlsx"
+    wb.save(workbook_path)
+
+    cfg = {
+        "workbooks": {
+            workbook_path.name: {
+                "effective_from": "2020-01",
+                "sheets": {
+                    "ImportsSheet": {
+                        "trade_type": "imports",
+                        "filename_pattern": default_filename_pattern("ImportsSheet"),
+                        "cast": {"period": "Date", "entry_date": "Date"},
+                        "parse": {
+                            "period": "yyyymm_to_date",
+                            "entry_date": "yyyymmdd_to_date",
+                        },
+                        "coerce_invalid_to_null": ["entry_date"],
+                    }
+                },
+            }
+        }
+    }
+    config_path = tmp_path / "microtrade.yaml"
+    config_path.write_text(yaml_.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    workbook_config = load_config(config_path).get_workbook(workbook_path)
+    imports = read_workbook(workbook_path, workbook_config)["imports"]
+
+    by_name = {c.physical_name: c for c in imports.columns}
+    assert by_name["entry_date"].coerce_invalid_to_null is True
+    assert by_name["period"].coerce_invalid_to_null is False
+
+
+def test_coerce_invalid_to_null_rejects_non_nullable_column(tmp_path: Path) -> None:
+    """Listing a non-nullable column in coerce_invalid_to_null raises at
+    import-spec time so the user fixes the config (rather than discovering
+    it at ingest)."""
+    import yaml as yaml_
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    wb.remove(wb.active)
+    ws = wb.create_sheet("ImportsSheet")
+    ws.append(["Position", "Description", "Length", "Type", "Nullable"])
+    ws.append([1, "period", 6, "Char", False])
+    ws.append([7, "entry_date", 8, "Char", False])  # non-nullable on purpose
+    workbook_path = tmp_path / "wb.xlsx"
+    wb.save(workbook_path)
+
+    cfg = {
+        "workbooks": {
+            workbook_path.name: {
+                "effective_from": "2020-01",
+                "sheets": {
+                    "ImportsSheet": {
+                        "trade_type": "imports",
+                        "filename_pattern": default_filename_pattern("ImportsSheet"),
+                        "cast": {"period": "Date", "entry_date": "Date"},
+                        "parse": {
+                            "period": "yyyymm_to_date",
+                            "entry_date": "yyyymmdd_to_date",
+                        },
+                        "coerce_invalid_to_null": ["entry_date"],
+                    }
+                },
+            }
+        }
+    }
+    config_path = tmp_path / "microtrade.yaml"
+    config_path.write_text(yaml_.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    workbook_config = load_config(config_path).get_workbook(workbook_path)
+    with pytest.raises(SpecError, match="coerce_invalid_to_null requires nullable"):
+        read_workbook(workbook_path, workbook_config)
+
+
 def test_drop_rejects_unknown_column_name(schema_workbook: Path, tmp_path: Path) -> None:
     import yaml as yaml_
 

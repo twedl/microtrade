@@ -248,11 +248,12 @@ def _run_stage2(
             return 1
         rows_total += summary.total_rows
         logger.info(
-            "  ingested in {:.1f}s: {} partition(s), {:,} rows, {:,} skipped",
+            "  ingested in {:.1f}s: {} partition(s), {:,} rows, {:,} skipped, {:,} coerced",
             time.perf_counter() - t0,
             summary.ok_count,
             summary.total_rows,
             summary.total_skipped,
+            summary.total_coerced,
         )
 
         t0 = time.perf_counter()

@@ -123,6 +123,7 @@ def iter_record_batches(
     encoding: str = "utf-8",
     on_quality_issue: QualityIssueSink | None = None,
     max_skip_rate: float = 1.0,
+    coerced_counts: dict[str, int] | None = None,
 ) -> Iterator[pa.RecordBatch]:
     """Yield pyarrow RecordBatches of up to `chunk_rows` rows streamed from `raw.path`.
 
@@ -162,6 +163,7 @@ def iter_record_batches(
                 encoding,
                 on_quality_issue,
                 max_skip_rate,
+                coerced_counts,
             )
 
 
@@ -175,13 +177,14 @@ def _stream_lines(
     encoding: str,
     on_quality_issue: QualityIssueSink | None,
     max_skip_rate: float,
+    coerced_counts: dict[str, int] | None,
 ) -> Iterator[pa.RecordBatch]:
     text = io.TextIOWrapper(binstream, encoding=encoding, newline="")
     # Precompute slices and per-column parser closures once per stream so the
     # per-row loop does a single indirect call + no dtype branching.
     n = len(columns_ordered)
     slices = [slice(c.start - 1, c.start - 1 + c.length) for c in columns_ordered]
-    parsers = [_make_parser(c) for c in columns_ordered]
+    parsers = [_make_parser(c, coerced_counts=coerced_counts) for c in columns_ordered]
     col_names = [c.effective_name for c in columns_ordered]
 
     # Computed columns: each runs after FWF parsing, indexing into the current
@@ -275,13 +278,18 @@ def _stream_lines(
         yield _build_batch(buffers, arrow_schema, field_types)
 
 
-def _make_parser(col: Column) -> Callable[[str], object]:
+def _make_parser(
+    col: Column, *, coerced_counts: dict[str, int] | None = None
+) -> Callable[[str], object]:
     """Return a closure that casts a single FWF substring to `col`'s dtype.
 
     Wraps the typed parser with a coerce-to-null shim when
     ``col.coerce_invalid_to_null`` is set, so per-value parse failures
     on this column write null instead of bubbling up as `_CastError`
-    (which would skip the row or raise).
+    (which would skip the row or raise). When ``coerced_counts`` is
+    provided, each coercion bumps the per-column counter so callers can
+    surface "we silenced N bad values in column X" in the manifest /
+    log.
     """
     parser = _make_typed_parser(col)
     if not col.coerce_invalid_to_null:
@@ -291,10 +299,14 @@ def _make_parser(col: Column) -> Callable[[str], object]:
             f"column {col.physical_name!r}: coerce_invalid_to_null requires nullable=True"
         )
 
+    name = col.effective_name
+
     def parser_with_coerce(raw_value: str) -> object:
         try:
             return parser(raw_value)
         except _CastError:
+            if coerced_counts is not None:
+                coerced_counts[name] = coerced_counts.get(name, 0) + 1
             return None
 
     return parser_with_coerce

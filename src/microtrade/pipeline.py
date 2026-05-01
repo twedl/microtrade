@@ -115,6 +115,10 @@ class PartitionResult:
     # single YTD file writes multiple partitions (Jan..Jun from a YYYY-06).
     snapshot_month: int
     error: str | None = None
+    # Per-column count of values silenced via Column.coerce_invalid_to_null
+    # (e.g. '00000000' on a Date column). File-level total, attributed to
+    # every partition the file produced — same accounting as `rows_skipped`.
+    coerced_counts: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -131,6 +135,17 @@ class RunSummary:
     @property
     def total_skipped(self) -> int:
         return sum(r.rows_skipped for r in self.results)
+
+    @property
+    def total_coerced(self) -> int:
+        # Counts the per-partition file-level totals once: each result for
+        # the same input file carries the same coerced_counts tuple, so
+        # summing across results would double-count. Group by input_path
+        # and sum each unique file's totals.
+        by_file: dict[str, int] = {}
+        for r in self.results:
+            by_file[r.input_path] = sum(n for _, n in r.coerced_counts)
+        return sum(by_file.values())
 
     @property
     def ok_count(self) -> int:
@@ -245,6 +260,7 @@ def _process_one(
         routing_column=spec.routing_column,
         compression=config.compression,
     )
+    coerced_counts: dict[str, int] = {}
     with _QualityIssueWriter(
         path=quality_path, run_id=run_id, raw=raw, limit=config.max_quality_issues
     ) as issue_sink:
@@ -257,6 +273,7 @@ def _process_one(
                     encoding=config.encoding,
                     on_quality_issue=issue_sink,
                     max_skip_rate=config.max_skip_rate,
+                    coerced_counts=coerced_counts,
                 ):
                     filtered = _route_rows(batch, raw, spec.routing_column, issue_sink)
                     if filtered.num_rows > 0:
@@ -278,10 +295,12 @@ def _process_one(
                     error=exc,
                     rows_skipped=issue_sink.count,
                     rows_skipped_logged=issue_sink.count_logged,
+                    coerced_counts=tuple(sorted(coerced_counts.items())),
                 )
             ]
 
         duration = time.perf_counter() - start
+        coerced_pairs = tuple(sorted(coerced_counts.items()))
 
         def success(year: int, month: int, rows: int, output_path: str) -> PartitionResult:
             # Row-level skipped counts are tracked at the file level and
@@ -301,6 +320,7 @@ def _process_one(
                 output_path=output_path,
                 status=STATUS_OK,
                 snapshot_month=raw.month,
+                coerced_counts=coerced_pairs,
             )
 
         if not partition_rows:
@@ -387,6 +407,7 @@ def _failure_result(
     error: BaseException,
     rows_skipped: int = 0,
     rows_skipped_logged: int = 0,
+    coerced_counts: tuple[tuple[str, int], ...] = (),
 ) -> PartitionResult:
     return PartitionResult(
         trade_type=raw.trade_type,
@@ -403,6 +424,7 @@ def _failure_result(
         status=STATUS_FAILED,
         snapshot_month=raw.month,
         error=f"{type(error).__name__}: {error}",
+        coerced_counts=coerced_counts,
     )
 
 
@@ -450,6 +472,7 @@ def _append_manifest(
             "output_path": result.output_path,
             "status": result.status,
             "error": result.error,
+            "coerced_counts": dict(result.coerced_counts),
         },
     )
 

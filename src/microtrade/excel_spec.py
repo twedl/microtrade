@@ -15,7 +15,7 @@ hot path.
 from __future__ import annotations
 
 import difflib
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -231,7 +231,7 @@ def _sheet_to_layout(df: pl.DataFrame, sheet: str) -> tuple[tuple[Column, ...], 
 
 
 def _check_unknown_physical(
-    keys: Mapping[str, str], columns: tuple[Column, ...], *, sheet: str, field: str
+    keys: Iterable[str], columns: tuple[Column, ...], *, sheet: str, field: str
 ) -> None:
     """Raise if any key in `keys` is not a workbook physical column name.
 
@@ -295,6 +295,34 @@ def _apply_parse(
         )
     return tuple(
         replace(col, parse=parse_map[col.physical_name]) if col.physical_name in parse_map else col
+        for col in columns
+    )
+
+
+def _apply_coerce_invalid_to_null(
+    columns: tuple[Column, ...], names: tuple[str, ...], *, sheet: str
+) -> tuple[Column, ...]:
+    """Stamp ``coerce_invalid_to_null=True`` on columns named in ``names``.
+
+    Each name must match an existing physical column AND that column must
+    be nullable — coerce-to-null only makes sense for nullable columns.
+    Misuse surfaces here at import time so the user fixes their config
+    instead of finding out at ingest time.
+    """
+    if not names:
+        return columns
+    name_set = frozenset(names)
+    _check_unknown_physical(name_set, columns, sheet=sheet, field="coerce_invalid_to_null")
+    non_nullable = sorted(
+        c.physical_name for c in columns if c.physical_name in name_set and not c.nullable
+    )
+    if non_nullable:
+        raise SpecError(
+            f"sheet {sheet!r}: coerce_invalid_to_null requires nullable columns; "
+            f"these are non-nullable: {non_nullable}"
+        )
+    return tuple(
+        replace(col, coerce_invalid_to_null=True) if col.physical_name in name_set else col
         for col in columns
     )
 
@@ -374,6 +402,10 @@ def read_workbook(workbook: Path, workbook_config: WorkbookConfig) -> dict[str, 
             columns = _apply_cast(columns, sheet_config.cast, sheet=sheet_name)
         if sheet_config.parse:
             columns = _apply_parse(columns, sheet_config.parse, sheet=sheet_name)
+        if sheet_config.coerce_invalid_to_null:
+            columns = _apply_coerce_invalid_to_null(
+                columns, sheet_config.coerce_invalid_to_null, sheet=sheet_name
+            )
         if trade_type in out:
             raise SpecError(
                 f"workbook {workbook.name}: sheets map multiple entries to trade_type "

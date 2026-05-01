@@ -234,6 +234,38 @@ def test_ingest_date_column_parses_yyyymmdd(tmp_path: Path) -> None:
     assert batch.column("entry_date").to_pylist() == [date(2024, 1, 15), date(2024, 2, 29)]
 
 
+def test_ingest_coerced_counts_dict_records_per_column_count(tmp_path: Path) -> None:
+    """A caller-supplied ``coerced_counts`` dict gets bumped per coercion,
+    keyed by ``effective_name``. Lets pipeline / ops surface the count
+    in manifests / logs."""
+    spec = Spec(
+        trade_type="imports",
+        version="2024-01",
+        effective_from="2024-01",
+        record_length=13,
+        columns=(
+            Column(physical_name="ref", start=1, length=5, dtype="Utf8", nullable=False),
+            Column(
+                physical_name="entry_date",
+                start=6,
+                length=8,
+                dtype="Date",
+                nullable=True,
+                parse="yyyymmdd_to_date",
+                coerce_invalid_to_null=True,
+            ),
+        ),
+    )
+    raw = _raw_input(
+        tmp_path,
+        ["AAAAA20240115", "BBBBB00000000", "CCCCC99999999", "DDDDD20240131"],
+    )
+
+    counts: dict[str, int] = {}
+    list(iter_record_batches(raw, spec, chunk_rows=100, coerced_counts=counts))
+    assert counts == {"entry_date": 2}
+
+
 def test_ingest_coerce_invalid_to_null_writes_null_on_parse_failure(tmp_path: Path) -> None:
     """A nullable Date column with coerce_invalid_to_null=True writes null
     instead of raising / skipping when the value (e.g. '00000000') doesn't
