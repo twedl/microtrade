@@ -6,6 +6,22 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.21] - 2026-04-30
+
+### Added
+
+- `run(settings, only_keys=[YearKey(...), ...])` restricts stage 2
+  to the listed `(trade_type, year)` pairs (intersected with the
+  current dirty plan). Stage 1, mirror, pull, push_manifests still
+  run normally. Lets you debug a single failing year without
+  re-processing the rest of a large dirty plan.
+- CLI: `microtrade ops run --only imports/2025` (repeatable). Same
+  semantics as the kwarg.
+- Years requested via `only_keys` that aren't currently dirty are
+  skipped with a warning. Remove the corresponding
+  `raw_manifests_dir/<raw>.json` first if you want to force
+  reprocess of an already-clean year.
+
 ## [0.2.20] - 2026-04-30
 
 ### Added
