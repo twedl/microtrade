@@ -6,6 +6,19 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.22] - 2026-05-01
+
+### Added
+
+- `Column.coerce_invalid_to_null: bool = False` (per-column,
+  serialized to YAML only when True). When set, parse failures on
+  that column write null instead of skipping the row (or raising).
+  Use case: sentinel-style invalid values like `'00000000'` for a
+  Date column that means "missing date" — the value can't be
+  parsed but the row is still good. Requires `nullable=True`;
+  enforced at parser-build time with a clear `IngestError`.
+  Round-trips through `save_spec` / `load_spec`.
+
 ## [0.2.21] - 2026-04-30
 
 ### Added
