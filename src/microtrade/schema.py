@@ -53,6 +53,11 @@ class Column:
     # Stable name across workbook versions; `canonical_columns` merges on
     # this, so a rename upstream doesn't fork the dataset.
     logical_name: str | None = None
+    # If True, parse failures on this column write null instead of
+    # skipping the row (or raising). For columns with sentinel values
+    # like '00000000' meaning "missing date" or '99999999' meaning
+    # "unknown". Requires nullable=True; enforced at parser build time.
+    coerce_invalid_to_null: bool = False
 
     @property
     def end(self) -> int:
@@ -349,6 +354,8 @@ def _column_to_dict(col: Column) -> dict[str, Any]:
         out["parse"] = col.parse
     if col.description is not None:
         out["description"] = col.description
+    if col.coerce_invalid_to_null:
+        out["coerce_invalid_to_null"] = True
     return out
 
 
@@ -362,6 +369,7 @@ def _column_from_dict(data: dict[str, Any]) -> Column:
         parse=data.get("parse"),
         description=data.get("description"),
         logical_name=_opt_str(data, "logical_name"),
+        coerce_invalid_to_null=bool(data.get("coerce_invalid_to_null", False)),
     )
 
 

@@ -278,6 +278,31 @@ def _stream_lines(
 def _make_parser(col: Column) -> Callable[[str], object]:
     """Return a closure that casts a single FWF substring to `col`'s dtype.
 
+    Wraps the typed parser with a coerce-to-null shim when
+    ``col.coerce_invalid_to_null`` is set, so per-value parse failures
+    on this column write null instead of bubbling up as `_CastError`
+    (which would skip the row or raise).
+    """
+    parser = _make_typed_parser(col)
+    if not col.coerce_invalid_to_null:
+        return parser
+    if not col.nullable:
+        raise IngestError(
+            f"column {col.physical_name!r}: coerce_invalid_to_null requires nullable=True"
+        )
+
+    def parser_with_coerce(raw_value: str) -> object:
+        try:
+            return parser(raw_value)
+        except _CastError:
+            return None
+
+    return parser_with_coerce
+
+
+def _make_typed_parser(col: Column) -> Callable[[str], object]:
+    """Return the dtype-specific parser closure for ``col``.
+
     All dtype-specific branching happens here, once per column, rather than on
     every value during streaming. Closures raise `_CastError` on failure; the
     caller decides whether to log-and-skip or re-raise as `IngestError`.

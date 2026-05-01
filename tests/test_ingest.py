@@ -234,6 +234,64 @@ def test_ingest_date_column_parses_yyyymmdd(tmp_path: Path) -> None:
     assert batch.column("entry_date").to_pylist() == [date(2024, 1, 15), date(2024, 2, 29)]
 
 
+def test_ingest_coerce_invalid_to_null_writes_null_on_parse_failure(tmp_path: Path) -> None:
+    """A nullable Date column with coerce_invalid_to_null=True writes null
+    instead of raising / skipping when the value (e.g. '00000000') doesn't
+    parse. The row still gets written."""
+    spec = Spec(
+        trade_type="imports",
+        version="2024-01",
+        effective_from="2024-01",
+        record_length=13,
+        columns=(
+            Column(physical_name="ref", start=1, length=5, dtype="Utf8", nullable=False),
+            Column(
+                physical_name="entry_date",
+                start=6,
+                length=8,
+                dtype="Date",
+                nullable=True,
+                parse="yyyymmdd_to_date",
+                coerce_invalid_to_null=True,
+            ),
+        ),
+    )
+    good_line = "AAAAA" + "20240115"
+    bad_line = "BBBBB" + "00000000"  # the sentinel-style invalid value
+    raw = _raw_input(tmp_path, [good_line, bad_line])
+
+    (batch,) = list(iter_record_batches(raw, spec, chunk_rows=100))
+    assert batch.num_rows == 2
+    assert batch.column("entry_date").to_pylist() == [date(2024, 1, 15), None]
+
+
+def test_ingest_coerce_invalid_to_null_requires_nullable(tmp_path: Path) -> None:
+    """coerce_invalid_to_null on a non-nullable column is a config error
+    surfaced at parser-build time."""
+    spec = Spec(
+        trade_type="imports",
+        version="2024-01",
+        effective_from="2024-01",
+        record_length=13,
+        columns=(
+            Column(physical_name="ref", start=1, length=5, dtype="Utf8", nullable=False),
+            Column(
+                physical_name="entry_date",
+                start=6,
+                length=8,
+                dtype="Date",
+                nullable=False,
+                parse="yyyymmdd_to_date",
+                coerce_invalid_to_null=True,
+            ),
+        ),
+    )
+    raw = _raw_input(tmp_path, ["AAAAA20240115"])
+
+    with pytest.raises(IngestError, match="coerce_invalid_to_null requires nullable"):
+        list(iter_record_batches(raw, spec, chunk_rows=100))
+
+
 def test_ingest_sink_captures_bad_row_and_continues(imports_spec, tmp_path: Path) -> None:
     good = render_fwf_lines(imports_spec, n_rows=3, seed=0)
     col = {c.physical_name: c for c in imports_spec.columns}["value_usd"]

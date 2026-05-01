@@ -95,6 +95,33 @@ def test_yaml_roundtrip(tmp_path: Path) -> None:
     assert loaded == spec
 
 
+def test_yaml_roundtrip_with_coerce_invalid_to_null(tmp_path: Path) -> None:
+    """The new flag round-trips through YAML so a spec written with
+    coerce_invalid_to_null=True survives load_spec round-tripping."""
+    cols = (
+        Column(physical_name="period", start=1, length=6, dtype="Date", parse="yyyymm_to_date"),
+        Column(physical_name="hs_code", start=7, length=10, dtype="Utf8", nullable=False),
+        Column(physical_name="value_usd", start=17, length=15, dtype="Int64", nullable=False),
+        Column(
+            physical_name="entry_date",
+            start=32,
+            length=8,
+            dtype="Date",
+            nullable=True,
+            parse="yyyymmdd_to_date",
+            coerce_invalid_to_null=True,
+        ),
+    )
+    spec = _spec(columns=cols, record_length=39)
+    path = tmp_path / "v2024-01.yaml"
+    save_spec(spec, path)
+    loaded = load_spec(path)
+    assert loaded == spec
+    assert loaded.columns[3].coerce_invalid_to_null is True
+    # Other columns default to False — emitted only when True.
+    assert loaded.columns[0].coerce_invalid_to_null is False
+
+
 def test_yaml_roundtrip_with_source_and_derived(tmp_path: Path) -> None:
     spec = _spec(
         source=SpecSource(
