@@ -357,11 +357,12 @@ def read_workbook(workbook: Path, workbook_config: WorkbookConfig) -> dict[str, 
     """Parse only the sheets listed in `workbook_config.sheets` into Specs.
 
     Each listed sheet maps to a trade type (explicit via `SheetConfig.trade_type`,
-    or positional via TRADE_TYPES when omitted). `effective_from`, `effective_to`,
-    `workbook_id`, and per-sheet `filename_pattern` all come from the config and
-    are baked into the emitted Specs so discovery can run without the config.
+    or positional via TRADE_TYPES when omitted). `effective_from`/`effective_to`
+    come from `WorkbookConfig.sheet_window(sheet_name)`, so a sheet-level
+    override on `SheetConfig` wins over the workbook default. `workbook_id`
+    and per-sheet `filename_pattern` come from the config and are baked
+    into the emitted Specs so discovery can run without the config.
     """
-    effective_from = workbook_config.effective_from
     workbook = workbook.resolve()
     sha = file_sha256(workbook)
     imported_at = now_iso()
@@ -411,11 +412,12 @@ def read_workbook(workbook: Path, workbook_config: WorkbookConfig) -> dict[str, 
                 f"workbook {workbook.name}: sheets map multiple entries to trade_type "
                 f"{trade_type!r}"
             )
+        sheet_from, sheet_to = workbook_config.sheet_window(sheet_name)
         spec = Spec(
             trade_type=trade_type,
-            version=effective_from,
-            effective_from=effective_from,
-            effective_to=workbook_config.effective_to,
+            version=sheet_from,
+            effective_from=sheet_from,
+            effective_to=sheet_to,
             record_length=record_length,
             columns=columns,
             routing_column=sheet_config.routing_column,

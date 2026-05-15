@@ -233,14 +233,13 @@ def _import_one_workbook(
 ) -> None:
     workbook_config = project_config.get_workbook(workbook)
     specs = excel_spec.read_workbook(workbook, workbook_config)
-    effective_from = workbook_config.effective_from
     for trade_type, spec in specs.items():
-        target = out / trade_type / f"v{effective_from}.yaml"
+        target = out / trade_type / f"v{spec.effective_from}.yaml"
         if target.exists() and not force:
             typer.echo(f"{target} already exists; pass --force to overwrite.", err=True)
             raise typer.Exit(code=1)
 
-        previous = _latest_previous(out, trade_type, effective_from)
+        previous = _latest_previous(out, trade_type, spec.effective_from)
         schema.save_spec(spec, target)
         typer.echo(f"wrote {target} ({len(spec.columns)} columns)")
         if previous is not None:
