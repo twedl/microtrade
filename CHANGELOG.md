@@ -6,6 +6,30 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.24] - 2026-05-15
+
+### Added
+
+- `SheetConfig.effective_from` and `SheetConfig.effective_to`
+  (optional, new keys in `microtrade.yaml`). Lets one workbook back
+  sheets that became effective at different dates: each field falls
+  back to the workbook-level value independently, so existing
+  configs are unchanged. The resolved per-sheet window is what gets
+  baked into each emitted Spec and what `microtrade ops` filters
+  raw filenames against in `match_raw`.
+- `WorkbookConfig.sheet_window(sheet_name) -> (str, str | None)`
+  returns the resolved `(effective_from, effective_to)` pair for a
+  named sheet. Single source of truth for `excel_spec.read_workbook`,
+  the `import-spec` CLI / ops runner target path
+  (`v<effective_from>.yaml` now comes from each spec's own value),
+  and `ops.planner.match_raw`.
+
+### Changed
+
+- `WorkbookConfig.__post_init__` now cross-checks the resolved
+  window for every sheet, so a sheet override that produces
+  `effective_to < effective_from` is rejected at config load time.
+
 ## [0.2.23] - 2026-05-01
 
 ### Added
