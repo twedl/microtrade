@@ -6,6 +6,41 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.25] - 2026-05-15
+
+### Added
+
+- `Spec.encoding: str | None` and `Spec.encoding_overrides:
+  tuple[EncodingOverride, ...]` (both optional, new keys in
+  emitted spec YAMLs). Lets a single spec pin an FWF text codec
+  that differs from the per-run `PipelineConfig.encoding`, and
+  lets the codec shift inside the spec's effective window —
+  useful when the same column layout shipped under cp850 in
+  earlier years and cp1252 later, without splitting the spec.
+- `WorkbookConfig.encoding` and `WorkbookConfig.encoding_overrides`
+  (workbook-level defaults in `microtrade.yaml`), plus matching
+  `SheetConfig.encoding` and `SheetConfig.encoding_overrides`
+  (per-sheet overrides). A sheet that sets `encoding_overrides`
+  replaces (not merges with) the workbook list; an explicit empty
+  list means "no overrides for this sheet" while a missing key
+  inherits.
+- `WorkbookConfig.sheet_encoding(name)` and
+  `WorkbookConfig.sheet_encoding_overrides(name)` return the
+  resolved values for a named sheet. Used by `excel_spec` to bake
+  the values into each emitted Spec.
+- `Spec.encoding_for(period) -> str | None` picks the codec for a
+  raw file's snapshot period (override hit, else `spec.encoding`,
+  else `None` so the caller falls back to
+  `PipelineConfig.encoding`). Called once per raw file at ingest
+  time.
+
+### Changed
+
+- `validate_spec` rejects `encoding_overrides` whose window falls
+  outside the spec's `[effective_from, effective_to]`, overlaps
+  another override on the same spec, or is open-ended when the
+  spec itself is closed.
+
 ## [0.2.24] - 2026-05-15
 
 ### Added
