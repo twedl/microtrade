@@ -52,6 +52,7 @@ from microtrade.schema import (
     DATE_PARSERS,
     TRADE_TYPES,
     ComputedColumn,
+    EncodingOverride,
     SpecError,
     validate_filename_pattern,
     validate_period,
@@ -59,6 +60,11 @@ from microtrade.schema import (
 )
 
 DEFAULT_CONFIG_PATH = Path("microtrade.yaml")
+
+# Sentinel: `_parse_encoding_overrides` uses it to distinguish "key absent
+# in YAML" (sheet inherits workbook) from "key present, empty list" (sheet
+# has no overrides regardless of workbook).
+_UNSET: Any = object()
 
 
 class ConfigError(ValueError):
@@ -121,6 +127,16 @@ class SheetConfig:
     # cross-checked (from <= to) in `WorkbookConfig.__post_init__`.
     effective_from: str | None = None
     effective_to: str | None = None
+    # Optional per-sheet override for the FWF text codec used at ingest
+    # time. Falls back to the workbook value; if both are unset the
+    # emitted Spec carries no encoding and ingest uses the per-run
+    # `PipelineConfig.encoding` (default `"utf-8"`).
+    encoding: str | None = None
+    # Optional per-sheet period-windowed encoding overrides. When
+    # present, replaces (not merges with) the workbook-level list. Use
+    # this when the same column layout shipped under different codecs
+    # at different periods. `None` means "inherit the workbook list".
+    encoding_overrides: tuple[EncodingOverride, ...] | None = None
 
     def __post_init__(self) -> None:
         validate_filename_pattern(self.filename_pattern, error_cls=ConfigError)
@@ -191,6 +207,16 @@ class WorkbookConfig:
     sheets: Mapping[str, SheetConfig]
     workbook_id: str | None = None
     effective_to: str | None = None
+    # Default FWF text codec for every sheet in this workbook. Each
+    # sheet may override on its own `SheetConfig`. When both are unset
+    # the emitted Spec carries no encoding (ingest uses the per-run
+    # default).
+    encoding: str | None = None
+    # Default period-windowed encoding overrides for every sheet in
+    # this workbook. A sheet that sets its own `encoding_overrides`
+    # replaces this list (not merges). Used for specs whose layout is
+    # stable across years but whose text codec shifted at some boundary.
+    encoding_overrides: tuple[EncodingOverride, ...] = ()
 
     def __post_init__(self) -> None:
         validate_period_window(self.effective_from, self.effective_to, error_cls=ConfigError)
@@ -213,6 +239,26 @@ class WorkbookConfig:
         eff_from = sheet.effective_from if sheet.effective_from is not None else self.effective_from
         eff_to = sheet.effective_to if sheet.effective_to is not None else self.effective_to
         return eff_from, eff_to
+
+    def sheet_encoding(self, sheet_name: str) -> str | None:
+        """Resolved FWF codec for `sheet_name`: sheet override -> workbook default -> None."""
+        sheet = self.sheets[sheet_name]
+        return sheet.encoding if sheet.encoding is not None else self.encoding
+
+    def sheet_encoding_overrides(self, sheet_name: str) -> tuple[EncodingOverride, ...]:
+        """Resolved encoding overrides for `sheet_name`: sheet list (if set) else workbook list.
+
+        A sheet that omits `encoding_overrides` inherits the workbook
+        list. A sheet that sets `encoding_overrides` replaces the
+        workbook list entirely; an explicit empty list means "no
+        overrides for this sheet" even if the workbook has some.
+        """
+        sheet = self.sheets[sheet_name]
+        return (
+            sheet.encoding_overrides
+            if sheet.encoding_overrides is not None
+            else self.encoding_overrides
+        )
 
 
 @dataclass(frozen=True)
@@ -272,10 +318,16 @@ def _workbook_from_dict(name: str, data: dict[str, Any]) -> WorkbookConfig:
             raise ConfigError(f"workbook {name!r}: sheet {sheet_name!r} must be a mapping")
         sheets[str(sheet_name)] = _sheet_from_dict(name, str(sheet_name), sheet_entry)
 
+    wb_overrides = _parse_encoding_overrides(
+        data.get("encoding_overrides"), where=f"workbook {name!r}"
+    )
+
     return WorkbookConfig(
         effective_from=effective_from,
         effective_to=(str(data["effective_to"]) if data.get("effective_to") else None),
         workbook_id=(str(data["workbook_id"]) if data.get("workbook_id") else None),
+        encoding=(str(data["encoding"]) if data.get("encoding") else None),
+        encoding_overrides=wb_overrides or (),
         sheets=sheets,
     )
 
@@ -306,6 +358,11 @@ def _sheet_from_dict(workbook_name: str, sheet_name: str, data: dict[str, Any]) 
     routing_column = data.get("routing_column")
     eff_from = data.get("effective_from")
     eff_to = data.get("effective_to")
+    encoding = data.get("encoding")
+    encoding_overrides = _parse_encoding_overrides(
+        data.get("encoding_overrides", _UNSET),
+        where=f"workbook {workbook_name!r} sheet {sheet_name!r}",
+    )
     return SheetConfig(
         filename_pattern=pattern,
         routing_column=str(routing_column) if routing_column is not None else "period",
@@ -318,7 +375,52 @@ def _sheet_from_dict(workbook_name: str, sheet_name: str, data: dict[str, Any]) 
         coerce_invalid_to_null=tuple(coerce_raw),
         effective_from=str(eff_from) if eff_from is not None else None,
         effective_to=str(eff_to) if eff_to is not None else None,
+        encoding=str(encoding) if encoding is not None else None,
+        encoding_overrides=encoding_overrides,
     )
+
+
+def _parse_encoding_overrides(raw: Any, *, where: str) -> tuple[EncodingOverride, ...] | None:
+    """Parse an `encoding_overrides` block.
+
+    Returns `None` when the key was absent (sheet callers inherit the
+    workbook list at resolution time; workbook callers coerce that
+    `None` to `()`). Cross-window validation (in-range, non-overlapping)
+    happens in `validate_spec` once the overrides land on a Spec.
+    """
+    if raw is _UNSET or raw is None:
+        return None
+    if not isinstance(raw, list):
+        raise ConfigError(f"{where}: 'encoding_overrides' must be a list, got {type(raw).__name__}")
+    out: list[EncodingOverride] = []
+    for i, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            raise ConfigError(
+                f"{where}: encoding_overrides[{i}] must be a mapping with "
+                f"'effective_from' and 'encoding' (got {type(entry).__name__})"
+            )
+        try:
+            eff_from = str(entry["effective_from"])
+            enc = str(entry["encoding"])
+        except KeyError as exc:
+            raise ConfigError(
+                f"{where}: encoding_overrides[{i}] missing required key {exc.args[0]!r}"
+            ) from exc
+        eff_to = entry.get("effective_to")
+        try:
+            validate_period_window(
+                eff_from, str(eff_to) if eff_to is not None else None, error_cls=ConfigError
+            )
+        except ConfigError as exc:
+            raise ConfigError(f"{where}: encoding_overrides[{i}]: {exc}") from exc
+        out.append(
+            EncodingOverride(
+                effective_from=eff_from,
+                encoding=enc,
+                effective_to=str(eff_to) if eff_to is not None else None,
+            )
+        )
+    return tuple(out)
 
 
 def _computed_columns(

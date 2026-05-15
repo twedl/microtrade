@@ -959,6 +959,120 @@ def test_read_workbook_sheet_overrides_effective_window(tmp_path: Path) -> None:
     assert specs["exports_nonus"].effective_to == "2023-12"
 
 
+def test_read_workbook_bakes_encoding_with_sheet_override(tmp_path: Path) -> None:
+    """Workbook-level `encoding` defaults every sheet; a sheet may override.
+
+    Sheets without an override inherit the workbook default; unset on both
+    leaves `Spec.encoding=None` so ingest falls back to `PipelineConfig.encoding`.
+    """
+    workbook = build_workbook(tmp_path / "wb.xlsx")
+    import yaml as yaml_
+
+    sheets_cfg: dict[str, dict[str, object]] = {}
+    for trade_type, sheet_title in SHEET_TITLES.items():
+        entry: dict[str, object] = {
+            "trade_type": trade_type,
+            "filename_pattern": default_filename_pattern(sheet_title),
+        }
+        # Only `imports` overrides — others inherit the workbook default.
+        if trade_type == "imports":
+            entry["encoding"] = "cp850"
+        sheets_cfg[sheet_title] = entry
+    (tmp_path / "microtrade.yaml").write_text(
+        yaml_.safe_dump(
+            {
+                "workbooks": {
+                    workbook.name: {
+                        "effective_from": "2020-01",
+                        "encoding": "cp1252",
+                        "sheets": sheets_cfg,
+                    }
+                }
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    workbook_config = load_config(tmp_path / "microtrade.yaml").get_workbook(workbook)
+
+    specs = read_workbook(workbook, workbook_config)
+    assert specs["imports"].encoding == "cp850"  # sheet override
+    assert specs["exports_us"].encoding == "cp1252"  # workbook default
+    assert specs["exports_nonus"].encoding == "cp1252"  # workbook default
+
+
+def test_read_workbook_bakes_encoding_overrides_with_sheet_replace(tmp_path: Path) -> None:
+    """Workbook-level `encoding_overrides` is the default; a sheet that sets its
+    own list replaces (not merges) the workbook list. A sheet that omits the
+    key inherits the workbook list."""
+    workbook = build_workbook(tmp_path / "wb.xlsx")
+    import yaml as yaml_
+
+    sheets_cfg: dict[str, dict[str, object]] = {}
+    for trade_type, sheet_title in SHEET_TITLES.items():
+        entry: dict[str, object] = {
+            "trade_type": trade_type,
+            "filename_pattern": default_filename_pattern(sheet_title),
+        }
+        if trade_type == "imports":
+            # Sheet replaces workbook list with a different boundary.
+            entry["encoding_overrides"] = [
+                {"effective_from": "2020-01", "effective_to": "2020-12", "encoding": "utf-8"}
+            ]
+        elif trade_type == "exports_us":
+            # Explicit empty list = no overrides for this sheet, even though
+            # workbook has some.
+            entry["encoding_overrides"] = []
+        # exports_nonus: key absent → inherits workbook
+        sheets_cfg[sheet_title] = entry
+
+    (tmp_path / "microtrade.yaml").write_text(
+        yaml_.safe_dump(
+            {
+                "workbooks": {
+                    workbook.name: {
+                        "effective_from": "2020-01",
+                        "encoding": "cp1252",
+                        "encoding_overrides": [
+                            {
+                                "effective_from": "2020-01",
+                                "effective_to": "2020-06",
+                                "encoding": "cp850",
+                            }
+                        ],
+                        "sheets": sheets_cfg,
+                    }
+                }
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    workbook_config = load_config(tmp_path / "microtrade.yaml").get_workbook(workbook)
+    specs = read_workbook(workbook, workbook_config)
+
+    # imports: sheet override (utf-8) replaces the workbook (cp850) list.
+    assert specs["imports"].encoding_overrides[0].encoding == "utf-8"
+    # exports_us: empty list — no overrides.
+    assert specs["exports_us"].encoding_overrides == ()
+    # exports_nonus: inherits workbook cp850 override.
+    assert specs["exports_nonus"].encoding_overrides[0].encoding == "cp850"
+    # Spec-level encoding default also propagates everywhere.
+    for spec in specs.values():
+        assert spec.encoding == "cp1252"
+
+
+def test_read_workbook_omits_encoding_when_unset(tmp_path: Path) -> None:
+    """With no encoding set anywhere, generated specs carry `encoding=None`."""
+    workbook = build_workbook(tmp_path / "wb.xlsx")
+    config_path = build_project_config(tmp_path / "microtrade.yaml", workbook, "2020-01")
+    workbook_config = load_config(config_path).get_workbook(workbook)
+
+    specs = read_workbook(workbook, workbook_config)
+    for spec in specs.values():
+        assert spec.encoding is None
+
+
 def test_workbook_config_rejects_malformed_sheet_period(tmp_path: Path) -> None:
     workbook = build_workbook(tmp_path / "wb.xlsx")
     config_path = _build_per_sheet_window_config(

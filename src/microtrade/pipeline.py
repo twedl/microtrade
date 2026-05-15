@@ -270,7 +270,7 @@ def _process_one(
                     raw,
                     spec,
                     chunk_rows=config.chunk_rows,
-                    encoding=config.encoding,
+                    encoding=spec.encoding_for(raw.period) or config.encoding,
                     on_quality_issue=issue_sink,
                     max_skip_rate=config.max_skip_rate,
                     coerced_counts=coerced_counts,

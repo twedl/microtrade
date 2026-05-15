@@ -159,6 +159,151 @@ def test_pipeline_writes_one_manifest_line_per_partition(prepared_env) -> None:
             assert record["rows_written"] > 0
 
 
+def test_pipeline_uses_spec_encoding_when_set(tmp_path: Path) -> None:
+    """`spec.encoding` overrides `PipelineConfig.encoding` at ingest time.
+
+    Builds a spec pinned to cp850 and a zip whose data contains `0x90`
+    (an invalid bare byte under utf-8). With the default
+    `PipelineConfig.encoding="utf-8"`, decoding would raise; the spec
+    override must take precedence and decode `0x90` -> `É`.
+    """
+    import zipfile
+
+    cols = (
+        schema.Column(
+            physical_name="period",
+            start=1,
+            length=6,
+            dtype="Date",
+            nullable=False,
+            parse="yyyymm_to_date",
+        ),
+        schema.Column(
+            physical_name="description", start=7, length=10, dtype="Utf8", nullable=False
+        ),
+    )
+    spec = schema.Spec(
+        trade_type="imports",
+        version="2024-01",
+        effective_from="2024-01",
+        record_length=16,
+        columns=cols,
+        routing_column="period",
+        encoding="cp850",
+        source=schema.SpecSource(
+            workbook="test.xlsx",
+            sha256="abc",
+            sheet="Imports",
+            imported_at="2024-01-01T00:00:00",
+            filename_pattern=r"^test_(?P<year>\d{4})(?P<month>\d{2})\.zip$",
+        ),
+    )
+    spec_dir = tmp_path / "specs"
+    schema.save_spec(spec, spec_dir / "imports" / "v2024-01.yaml")
+
+    raw_line = b"202404D\x90COR     "  # period=202404, description="D\x90COR     "
+    assert len(raw_line) == 16
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    with zipfile.ZipFile(input_dir / "test_202404.zip", "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("data.fwf", raw_line + b"\n")
+
+    summary = pipeline.run(
+        pipeline.PipelineConfig(
+            input_dir=input_dir,
+            output_dir=tmp_path / "output",
+            spec_dir=spec_dir,
+            ytd=False,
+            # PipelineConfig.encoding default is "utf-8" — would raise on 0x90.
+        )
+    )
+    assert summary.failed_count == 0, [r.error for r in summary.results]
+    assert summary.ok_count == 1
+
+    df = pl.scan_parquet(
+        tmp_path / "output" / "imports" / "**/*.parquet", hive_partitioning=True
+    ).collect()
+    assert df["description"].to_list() == ["DÉCOR"]  # cp850 0x90 -> É, stripped
+
+
+def test_pipeline_picks_encoding_per_period_via_spec_overrides(tmp_path: Path) -> None:
+    """`spec.encoding_for(period)` resolves the codec per raw file.
+
+    Two raws under the same spec: one inside the cp850 override window,
+    one after it falls back to the spec's cp1252 default. Both decode
+    correctly in a single run.
+    """
+    import zipfile
+
+    cols = (
+        schema.Column(
+            physical_name="period",
+            start=1,
+            length=6,
+            dtype="Date",
+            nullable=False,
+            parse="yyyymm_to_date",
+        ),
+        schema.Column(
+            physical_name="description", start=7, length=10, dtype="Utf8", nullable=False
+        ),
+    )
+    spec = schema.Spec(
+        trade_type="imports",
+        version="2010-01",
+        effective_from="2010-01",
+        effective_to="2020-12",
+        encoding="cp1252",
+        encoding_overrides=(
+            schema.EncodingOverride(
+                effective_from="2010-01", effective_to="2013-12", encoding="cp850"
+            ),
+        ),
+        record_length=16,
+        columns=cols,
+        routing_column="period",
+        source=schema.SpecSource(
+            workbook="test.xlsx",
+            sha256="abc",
+            sheet="Imports",
+            imported_at="2010-01-01T00:00:00",
+            filename_pattern=r"^test_(?P<year>\d{4})(?P<month>\d{2})\.zip$",
+        ),
+    )
+    spec_dir = tmp_path / "specs"
+    schema.save_spec(spec, spec_dir / "imports" / "v2010-01.yaml")
+
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    # 2013-04 raw: in cp850 window. `0x90` -> É under cp850; invalid under cp1252.
+    with zipfile.ZipFile(input_dir / "test_201304.zip", "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("data.fwf", b"201304D\x90COR     \n")
+    # 2018-04 raw: out of window, falls back to spec default cp1252.
+    # `0xC9` -> É under cp1252 (and latin-1); undefined under cp850 → would crash.
+    with zipfile.ZipFile(input_dir / "test_201804.zip", "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("data.fwf", b"201804D\xc9COR     \n")
+
+    summary = pipeline.run(
+        pipeline.PipelineConfig(
+            input_dir=input_dir,
+            output_dir=tmp_path / "output",
+            spec_dir=spec_dir,
+            ytd=False,
+        )
+    )
+    assert summary.failed_count == 0, [r.error for r in summary.results]
+    assert summary.ok_count == 2
+
+    df = (
+        pl.scan_parquet(tmp_path / "output" / "imports" / "**/*.parquet", hive_partitioning=True)
+        .collect()
+        .sort("year")
+    )
+    assert df["year"].to_list() == [2013, 2018]
+    # Both decode to "DÉCOR" via their respective codecs.
+    assert df["description"].to_list() == ["DÉCOR", "DÉCOR"]
+
+
 def test_pipeline_rerun_is_idempotent_and_creates_new_manifest(prepared_env) -> None:
     env = prepared_env
 

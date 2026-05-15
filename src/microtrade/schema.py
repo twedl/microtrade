@@ -90,6 +90,22 @@ class ComputedColumn:
 
 
 @dataclass(frozen=True)
+class EncodingOverride:
+    """Period-windowed FWF codec override on a single Spec.
+
+    Used when the same column layout shipped under different text codecs
+    across its lifetime (e.g. early DOS-era drops in cp850, later drops
+    in cp1252). The override's `[effective_from, effective_to]` window
+    must sit inside the parent Spec's window, and windows on a single
+    spec must not overlap each other; `validate_spec` enforces both.
+    """
+
+    effective_from: str
+    encoding: str
+    effective_to: str | None = None
+
+
+@dataclass(frozen=True)
 class SpecSource:
     workbook: str
     sha256: str
@@ -126,6 +142,17 @@ class Spec:
     # Inclusive upper bound on the period range this spec applies to (YYYY-MM).
     # None means open-ended (this spec is still current).
     effective_to: str | None = None
+    # Optional FWF text codec used when decoding raw bytes for this spec.
+    # When set, overrides the per-run `PipelineConfig.encoding`. Use this
+    # to pin a single spec (e.g. older DOS-encoded SC drops where
+    # `0x90 -> É` only round-trips through cp850) without changing the
+    # default codec applied to every other spec.
+    encoding: str | None = None
+    # Period-windowed exceptions to `encoding`, for specs whose column
+    # layout is stable but whose text codec shifted at some boundary.
+    # `validate_spec` enforces each window sits inside the spec window
+    # and that overrides on a single spec don't overlap.
+    encoding_overrides: tuple[EncodingOverride, ...] = ()
     # Columns computed from other columns at ingest time. Real parquet
     # columns in the output; no FWF slice of their own.
     computed_columns: tuple[ComputedColumn, ...] = ()
@@ -147,6 +174,20 @@ class Spec:
         this to allow trailing filler bytes that the data does not always ship.
         """
         return max((c.end for c in self.columns), default=0)
+
+    def encoding_for(self, period: str) -> str | None:
+        """Resolved FWF codec for `period` (`raw.period`): override hit or `self.encoding`.
+
+        `None` means the spec is unopinionated and the caller should
+        fall back to `PipelineConfig.encoding`. Overrides are validated
+        non-overlapping, so the first matching window is the answer.
+        """
+        for ov in self.encoding_overrides:
+            if ov.effective_from <= period and (
+                ov.effective_to is None or period <= ov.effective_to
+            ):
+                return ov.encoding
+        return self.encoding
 
 
 class SpecError(ValueError):
@@ -268,6 +309,8 @@ def validate_spec(spec: Spec) -> None:
     if spec.dropped_columns:
         _validate_dropped_columns(spec)
     _validate_routing_column(spec)
+    if spec.encoding_overrides:
+        _validate_encoding_overrides(spec)
 
 
 def _validate_dropped_columns(spec: Spec) -> None:
@@ -279,6 +322,39 @@ def _validate_dropped_columns(spec: Spec) -> None:
         )
     if available == set(spec.dropped_columns):
         raise SpecError("dropped_columns would leave the output schema empty")
+
+
+def _validate_encoding_overrides(spec: Spec) -> None:
+    """Each override window must be valid, sit inside the spec window, and not overlap others."""
+    spec_to = spec.effective_to
+    ordered = sorted(spec.encoding_overrides, key=lambda o: o.effective_from)
+    prev_to: str | None = None
+    for ov in ordered:
+        try:
+            validate_period_window(ov.effective_from, ov.effective_to)
+        except SpecError as exc:
+            raise SpecError(f"encoding_override {ov.encoding!r}: {exc}") from exc
+        if ov.effective_from < spec.effective_from:
+            raise SpecError(
+                f"encoding_override {ov.encoding!r} effective_from {ov.effective_from!r} "
+                f"precedes spec effective_from {spec.effective_from!r}"
+            )
+        if spec_to is not None and ov.effective_to is None:
+            raise SpecError(
+                f"encoding_override {ov.encoding!r} is open-ended but spec ends at "
+                f"{spec_to!r}; set effective_to on the override."
+            )
+        if spec_to is not None and ov.effective_to is not None and ov.effective_to > spec_to:
+            raise SpecError(
+                f"encoding_override {ov.encoding!r} effective_to {ov.effective_to!r} "
+                f"exceeds spec effective_to {spec_to!r}"
+            )
+        if prev_to is not None and ov.effective_from <= prev_to:
+            raise SpecError(
+                f"encoding_overrides overlap: {ov.effective_from!r} starts at or before "
+                f"previous override's effective_to {prev_to!r}"
+            )
+        prev_to = ov.effective_to
 
 
 def _validate_routing_column(spec: Spec) -> None:
@@ -381,6 +457,10 @@ def spec_to_dict(spec: Spec) -> dict[str, Any]:
     }
     if spec.effective_to is not None:
         out["effective_to"] = spec.effective_to
+    if spec.encoding is not None:
+        out["encoding"] = spec.encoding
+    if spec.encoding_overrides:
+        out["encoding_overrides"] = [_encoding_override_to_dict(o) for o in spec.encoding_overrides]
     out["record_length"] = spec.record_length
     if spec.source is not None:
         source: dict[str, Any] = {
@@ -404,6 +484,21 @@ def spec_to_dict(spec: Spec) -> dict[str, Any]:
         out["derived"] = [{name: expr} for name, expr in spec.derived]
     out["partition_by"] = list(spec.partition_by)
     return out
+
+
+def _encoding_override_to_dict(ov: EncodingOverride) -> dict[str, Any]:
+    out: dict[str, Any] = {"effective_from": ov.effective_from, "encoding": ov.encoding}
+    if ov.effective_to is not None:
+        out["effective_to"] = ov.effective_to
+    return out
+
+
+def _encoding_override_from_dict(data: dict[str, Any]) -> EncodingOverride:
+    return EncodingOverride(
+        effective_from=str(data["effective_from"]),
+        encoding=str(data["encoding"]),
+        effective_to=_opt_str(data, "effective_to"),
+    )
 
 
 def _computed_column_to_dict(col: ComputedColumn) -> dict[str, Any]:
@@ -451,6 +546,8 @@ def spec_from_dict(data: dict[str, Any]) -> Spec:
     computed_raw = data.get("computed_columns") or []
     computed = tuple(_computed_column_from_dict(c) for c in computed_raw)
     dropped_raw = data.get("dropped_columns") or []
+    overrides_raw = data.get("encoding_overrides") or []
+    encoding_overrides = tuple(_encoding_override_from_dict(o) for o in overrides_raw)
     spec = Spec(
         trade_type=str(data["trade_type"]),
         version=str(data["version"]),
@@ -462,6 +559,8 @@ def spec_from_dict(data: dict[str, Any]) -> Spec:
         derived=derived,
         partition_by=tuple(data.get("partition_by", ("year", "month"))),
         effective_to=_opt_str(data, "effective_to"),
+        encoding=_opt_str(data, "encoding"),
+        encoding_overrides=encoding_overrides,
         computed_columns=computed,
         dropped_columns=tuple(str(n) for n in dropped_raw),
     )

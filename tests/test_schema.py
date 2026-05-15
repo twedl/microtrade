@@ -8,6 +8,7 @@ import pytest
 
 from microtrade.schema import (
     Column,
+    EncodingOverride,
     Spec,
     SpecError,
     SpecSource,
@@ -120,6 +121,130 @@ def test_yaml_roundtrip_with_coerce_invalid_to_null(tmp_path: Path) -> None:
     assert loaded.columns[3].coerce_invalid_to_null is True
     # Other columns default to False — emitted only when True.
     assert loaded.columns[0].coerce_invalid_to_null is False
+
+
+def test_yaml_roundtrip_with_encoding(tmp_path: Path) -> None:
+    """`encoding` is optional, emitted only when set, and round-trips through YAML."""
+    spec_no_enc = _spec()
+    path = tmp_path / "v2024-01.yaml"
+    save_spec(spec_no_enc, path)
+    assert "encoding" not in path.read_text()
+    assert load_spec(path).encoding is None
+
+    spec_enc = _spec(encoding="cp850")
+    save_spec(spec_enc, path)
+    assert load_spec(path).encoding == "cp850"
+
+
+def test_yaml_roundtrip_with_encoding_overrides(tmp_path: Path) -> None:
+    """encoding_overrides round-trip; emitted only when non-empty; key absent when empty."""
+    spec = _spec(
+        effective_from="2010-01",
+        effective_to="2020-12",
+        encoding="cp1252",
+        encoding_overrides=(
+            EncodingOverride(effective_from="2010-01", effective_to="2013-12", encoding="cp850"),
+        ),
+    )
+    path = tmp_path / "v2010-01.yaml"
+    save_spec(spec, path)
+    text = path.read_text()
+    assert "encoding_overrides:" in text
+    loaded = load_spec(path)
+    assert loaded == spec
+
+    # No overrides → key omitted entirely.
+    bare = _spec(effective_from="2010-01", effective_to="2020-12")
+    save_spec(bare, path)
+    assert "encoding_overrides" not in path.read_text()
+    assert load_spec(path).encoding_overrides == ()
+
+
+def test_encoding_for_picks_override_window_then_spec_default() -> None:
+    """encoding_for(): override hit beats spec.encoding; out-of-range falls back."""
+    spec = _spec(
+        effective_from="2010-01",
+        effective_to="2020-12",
+        encoding="cp1252",
+        encoding_overrides=(
+            EncodingOverride(effective_from="2010-01", effective_to="2013-12", encoding="cp850"),
+            EncodingOverride(effective_from="2018-06", effective_to=None, encoding="utf-8"),
+        ),
+    )
+    assert spec.encoding_for("2010-01") == "cp850"
+    assert spec.encoding_for("2013-12") == "cp850"
+    assert spec.encoding_for("2014-01") == "cp1252"  # gap → spec default
+    assert spec.encoding_for("2018-05") == "cp1252"
+    assert spec.encoding_for("2018-06") == "utf-8"  # open-ended override
+    assert spec.encoding_for("2025-01") == "utf-8"
+
+
+def test_encoding_for_returns_none_without_default_or_match() -> None:
+    spec = _spec(
+        effective_from="2010-01",
+        encoding_overrides=(
+            EncodingOverride(effective_from="2010-01", effective_to="2010-12", encoding="cp850"),
+        ),
+    )
+    assert spec.encoding_for("2010-06") == "cp850"
+    assert spec.encoding_for("2011-01") is None  # no spec default + no match
+
+
+def test_validate_spec_rejects_override_outside_spec_window() -> None:
+    with pytest.raises(SpecError, match="precedes spec effective_from"):
+        validate_spec(
+            _spec(
+                effective_from="2015-01",
+                encoding_overrides=(
+                    EncodingOverride(
+                        effective_from="2010-01", effective_to="2014-12", encoding="cp850"
+                    ),
+                ),
+            )
+        )
+    with pytest.raises(SpecError, match="exceeds spec effective_to"):
+        validate_spec(
+            _spec(
+                effective_from="2010-01",
+                effective_to="2015-12",
+                encoding_overrides=(
+                    EncodingOverride(
+                        effective_from="2010-01", effective_to="2016-12", encoding="cp850"
+                    ),
+                ),
+            )
+        )
+
+
+def test_validate_spec_rejects_overlapping_overrides() -> None:
+    with pytest.raises(SpecError, match="encoding_overrides overlap"):
+        validate_spec(
+            _spec(
+                effective_from="2010-01",
+                effective_to="2020-12",
+                encoding_overrides=(
+                    EncodingOverride(
+                        effective_from="2010-01", effective_to="2014-12", encoding="cp850"
+                    ),
+                    EncodingOverride(
+                        effective_from="2014-06", effective_to="2017-12", encoding="utf-8"
+                    ),
+                ),
+            )
+        )
+
+
+def test_validate_spec_rejects_open_ended_override_in_closed_spec() -> None:
+    with pytest.raises(SpecError, match="open-ended"):
+        validate_spec(
+            _spec(
+                effective_from="2010-01",
+                effective_to="2015-12",
+                encoding_overrides=(
+                    EncodingOverride(effective_from="2010-01", effective_to=None, encoding="cp850"),
+                ),
+            )
+        )
 
 
 def test_yaml_roundtrip_with_source_and_derived(tmp_path: Path) -> None:

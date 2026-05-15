@@ -413,11 +413,15 @@ def read_workbook(workbook: Path, workbook_config: WorkbookConfig) -> dict[str, 
                 f"{trade_type!r}"
             )
         sheet_from, sheet_to = workbook_config.sheet_window(sheet_name)
+        sheet_encoding = workbook_config.sheet_encoding(sheet_name)
+        sheet_encoding_overrides = workbook_config.sheet_encoding_overrides(sheet_name)
         spec = Spec(
             trade_type=trade_type,
             version=sheet_from,
             effective_from=sheet_from,
             effective_to=sheet_to,
+            encoding=sheet_encoding,
+            encoding_overrides=sheet_encoding_overrides,
             record_length=record_length,
             columns=columns,
             routing_column=sheet_config.routing_column,
