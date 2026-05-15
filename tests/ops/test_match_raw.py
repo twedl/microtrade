@@ -85,3 +85,44 @@ def test_window_boundaries_inclusive(cfg):
 
 def test_sheet_only_in_2020_does_not_leak(cfg):
     assert match_raw("S2_202503N.TXT.zip", cfg) is None
+
+
+PER_SHEET_WINDOW_YAML = """
+workbooks:
+  layout.xls:
+    workbook_id: WB
+    effective_from: 2020-01
+    effective_to: 2025-12
+    sheets:
+      S1:
+        trade_type: imports
+        effective_from: 2022-06
+        filename_pattern: '^S1_(?P<year>\\d{4})(?P<month>\\d{2})(?P<flag>[NC])\\.TXT\\.zip$'
+      S2:
+        trade_type: exports_us
+        effective_to: 2021-12
+        filename_pattern: '^S2_(?P<year>\\d{4})(?P<month>\\d{2})(?P<flag>[NC])\\.TXT\\.zip$'
+"""
+
+
+@pytest.fixture
+def per_sheet_cfg(tmp_path: Path):
+    p = tmp_path / "microtrade.yaml"
+    p.write_text(PER_SHEET_WINDOW_YAML)
+    return load_config(p)
+
+
+def test_match_raw_honours_sheet_effective_from(per_sheet_cfg):
+    # Before the sheet's effective_from (workbook would allow this).
+    assert match_raw("S1_202201N.TXT.zip", per_sheet_cfg) is None
+    # Inside the sheet's window.
+    m = match_raw("S1_202206N.TXT.zip", per_sheet_cfg)
+    assert m is not None and m.trade_type == "imports"
+
+
+def test_match_raw_honours_sheet_effective_to(per_sheet_cfg):
+    # Inside the sheet's narrower upper bound.
+    m = match_raw("S2_202112N.TXT.zip", per_sheet_cfg)
+    assert m is not None and m.trade_type == "exports_us"
+    # Past the sheet's effective_to but within the workbook's.
+    assert match_raw("S2_202203N.TXT.zip", per_sheet_cfg) is None

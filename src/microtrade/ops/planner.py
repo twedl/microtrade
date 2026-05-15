@@ -7,9 +7,11 @@ last recorded manifest (see `microtrade.ops.manifest`).
 
 Matches raw filenames to workbook/sheet entries in the project config
 (``microtrade.yaml``) using each sheet's ``filename_pattern`` and the
-workbook's ``[effective_from, effective_to]`` window. First match wins;
-windows are guaranteed non-overlapping by the project config, so
-first-match is deterministic.
+resolved ``[effective_from, effective_to]`` window for that sheet
+(per ``WorkbookConfig.sheet_window``, which falls back to the workbook
+default when the sheet does not override). First match wins; windows
+are guaranteed non-overlapping by the project config, so first-match
+is deterministic.
 """
 
 from __future__ import annotations
@@ -64,9 +66,10 @@ def match_raw(filename: str, cfg: ProjectConfig) -> Match | None:
                 continue
             gd = m.groupdict()
             ym = f"{gd['year']}-{gd['month']}"
-            if ym < wb.effective_from:
+            eff_from, eff_to = wb.sheet_window(sheet_name)
+            if ym < eff_from:
                 continue
-            if wb.effective_to is not None and ym > wb.effective_to:
+            if eff_to is not None and ym > eff_to:
                 continue
             return Match(
                 workbook_id=wb.workbook_id or wb_name,

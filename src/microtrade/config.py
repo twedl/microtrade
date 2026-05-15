@@ -22,12 +22,16 @@ Example:
 workbooks:
   XYZ12345_Record_Layout.xls:
     workbook_id: XYZ12345
-    effective_from: 2020-01
+    effective_from: 2020-01      # default for sheets that don't override
     effective_to: 2023-12        # optional; absent = open-ended
     sheets:
       Imports:
         trade_type: imports      # optional; defaults to positional
         filename_pattern: '^XYZ12345_Im(?P<year>\\d{4})(?P<month>\\d{2})\\.zip$'
+      Exports:
+        trade_type: exports_us
+        filename_pattern: '^XYZ12345_Ex(?P<year>\\d{4})(?P<month>\\d{2})\\.zip$'
+        effective_from: 2022-01  # sheet override; falls back to workbook otherwise
 ```
 """
 
@@ -48,7 +52,9 @@ from microtrade.schema import (
     DATE_PARSERS,
     TRADE_TYPES,
     ComputedColumn,
+    SpecError,
     validate_filename_pattern,
+    validate_period,
     validate_period_window,
 )
 
@@ -108,9 +114,23 @@ class SheetConfig:
     # (workbook nullability or via `cast` is not enough — the column must
     # not be flagged non-nullable); enforced at parser build time.
     coerce_invalid_to_null: tuple[str, ...] = ()
+    # Optional per-sheet overrides for the workbook's effective window.
+    # When set, the emitted Spec for this sheet carries these dates
+    # instead of the workbook defaults. Each field falls back to the
+    # workbook value independently. The resolved (from, to) pair is
+    # cross-checked (from <= to) in `WorkbookConfig.__post_init__`.
+    effective_from: str | None = None
+    effective_to: str | None = None
 
     def __post_init__(self) -> None:
         validate_filename_pattern(self.filename_pattern, error_cls=ConfigError)
+        for attr in ("effective_from", "effective_to"):
+            value = getattr(self, attr)
+            if value is not None:
+                try:
+                    validate_period(value)
+                except SpecError as exc:
+                    raise ConfigError(f"sheet {attr}: {exc}") from exc
         if self.trade_type is not None and self.trade_type not in TRADE_TYPES:
             raise ConfigError(
                 f"sheets.<name>.trade_type {self.trade_type!r} is not a known trade type; "
@@ -158,7 +178,14 @@ class SheetConfig:
 
 @dataclass(frozen=True)
 class WorkbookConfig:
-    """Config for one Excel workbook. All of its sheets share period window + workbook_id."""
+    """Config for one Excel workbook.
+
+    The workbook's `effective_from`/`effective_to` apply to every sheet
+    by default. A sheet may override either field on its own
+    `SheetConfig`; missing sheet-level fields fall back to the workbook
+    value independently. Use `sheet_window(name)` to get the resolved
+    pair for a specific sheet.
+    """
 
     effective_from: str
     sheets: Mapping[str, SheetConfig]
@@ -169,6 +196,23 @@ class WorkbookConfig:
         validate_period_window(self.effective_from, self.effective_to, error_cls=ConfigError)
         if not self.sheets:
             raise ConfigError("workbook config must declare at least one sheet")
+        for sheet_name in self.sheets:
+            eff_from, eff_to = self.sheet_window(sheet_name)
+            try:
+                validate_period_window(eff_from, eff_to, error_cls=ConfigError)
+            except ConfigError as exc:
+                raise ConfigError(f"sheet {sheet_name!r}: {exc}") from exc
+
+    def sheet_window(self, sheet_name: str) -> tuple[str, str | None]:
+        """Resolved (effective_from, effective_to) for `sheet_name`.
+
+        Each field falls back to the workbook value when the sheet does
+        not override it.
+        """
+        sheet = self.sheets[sheet_name]
+        eff_from = sheet.effective_from if sheet.effective_from is not None else self.effective_from
+        eff_to = sheet.effective_to if sheet.effective_to is not None else self.effective_to
+        return eff_from, eff_to
 
 
 @dataclass(frozen=True)
@@ -260,6 +304,8 @@ def _sheet_from_dict(workbook_name: str, sheet_name: str, data: dict[str, Any]) 
             f"'coerce_invalid_to_null' must be a list of strings"
         )
     routing_column = data.get("routing_column")
+    eff_from = data.get("effective_from")
+    eff_to = data.get("effective_to")
     return SheetConfig(
         filename_pattern=pattern,
         routing_column=str(routing_column) if routing_column is not None else "period",
@@ -270,6 +316,8 @@ def _sheet_from_dict(workbook_name: str, sheet_name: str, data: dict[str, Any]) 
         computed=computed,
         drop=tuple(drop_raw),
         coerce_invalid_to_null=tuple(coerce_raw),
+        effective_from=str(eff_from) if eff_from is not None else None,
+        effective_to=str(eff_to) if eff_to is not None else None,
     )
 
 

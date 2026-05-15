@@ -892,6 +892,106 @@ def test_read_workbook_bakes_effective_to(tmp_path: Path) -> None:
         assert spec.effective_to == "2023-12"
 
 
+def _build_per_sheet_window_config(
+    workbook_path: Path,
+    config_path: Path,
+    *,
+    workbook_from: str,
+    workbook_to: str | None,
+    sheet_overrides: dict[str, dict[str, str]],
+) -> Path:
+    """Write a microtrade.yaml that supports per-sheet effective_from/to overrides.
+
+    `sheet_overrides` is keyed by trade_type (mapped to its synthetic sheet
+    title via SHEET_TITLES) and carries the sheet-level keys to inject.
+    """
+    import yaml as yaml_
+
+    sheets_cfg: dict[str, dict[str, object]] = {}
+    for trade_type, sheet_title in SHEET_TITLES.items():
+        entry: dict[str, object] = {
+            "trade_type": trade_type,
+            "filename_pattern": default_filename_pattern(sheet_title),
+        }
+        entry.update(sheet_overrides.get(trade_type, {}))
+        sheets_cfg[sheet_title] = entry
+    workbook_entry: dict[str, object] = {
+        "effective_from": workbook_from,
+        "sheets": sheets_cfg,
+    }
+    if workbook_to is not None:
+        workbook_entry["effective_to"] = workbook_to
+    config_path.write_text(
+        yaml_.safe_dump({"workbooks": {workbook_path.name: workbook_entry}}, sort_keys=False),
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def test_read_workbook_sheet_overrides_effective_window(tmp_path: Path) -> None:
+    """A sheet may override `effective_from` / `effective_to` independently.
+
+    Sheets without an override fall back to the workbook-level values.
+    """
+    workbook = build_workbook(tmp_path / "wb.xlsx")
+    config_path = _build_per_sheet_window_config(
+        workbook,
+        tmp_path / "microtrade.yaml",
+        workbook_from="2020-01",
+        workbook_to="2023-12",
+        sheet_overrides={
+            "imports": {"effective_from": "2022-06"},  # narrower start
+            "exports_us": {"effective_to": "2024-12"},  # extends end past workbook
+        },
+    )
+    workbook_config = load_config(config_path).get_workbook(workbook)
+
+    specs = read_workbook(workbook, workbook_config)
+    # Sheet override wins for imports.
+    assert specs["imports"].effective_from == "2022-06"
+    assert specs["imports"].version == "2022-06"
+    assert specs["imports"].effective_to == "2023-12"  # falls back to workbook
+    # exports_us overrides only the upper bound.
+    assert specs["exports_us"].effective_from == "2020-01"
+    assert specs["exports_us"].effective_to == "2024-12"
+    # exports_nonus has no override and inherits both.
+    assert specs["exports_nonus"].effective_from == "2020-01"
+    assert specs["exports_nonus"].effective_to == "2023-12"
+
+
+def test_workbook_config_rejects_malformed_sheet_period(tmp_path: Path) -> None:
+    workbook = build_workbook(tmp_path / "wb.xlsx")
+    config_path = _build_per_sheet_window_config(
+        workbook,
+        tmp_path / "microtrade.yaml",
+        workbook_from="2020-01",
+        workbook_to=None,
+        sheet_overrides={"imports": {"effective_from": "not-a-date"}},
+    )
+
+    from microtrade.config import ConfigError
+
+    with pytest.raises(ConfigError, match="effective_from"):
+        load_config(config_path)
+
+
+def test_workbook_config_rejects_inverted_resolved_window(tmp_path: Path) -> None:
+    """Sheet effective_from past the workbook's effective_to is rejected."""
+    workbook = build_workbook(tmp_path / "wb.xlsx")
+    config_path = _build_per_sheet_window_config(
+        workbook,
+        tmp_path / "microtrade.yaml",
+        workbook_from="2020-01",
+        workbook_to="2023-12",
+        sheet_overrides={"imports": {"effective_from": "2024-06"}},
+    )
+
+    from microtrade.config import ConfigError
+
+    with pytest.raises(ConfigError, match="precedes effective_from"):
+        load_config(config_path)
+
+
 def test_read_workbook_default_workbook_id_derives_from_filename(
     schema_workbook: Path, workbook_config: WorkbookConfig
 ) -> None:
