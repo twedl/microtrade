@@ -23,7 +23,16 @@ from pathlib import Path
 from microtrade.schema import TRADE_TYPES, Spec, load_all, validate_filename_pattern
 
 # None (unflagged) wins over N wins over C when dedup'ing a (trade_type, year, month).
+# `flag_rank` is public so the ops planner can apply the same rule at
+# transport time and avoid pulling the loser from the remote archive.
 _FLAG_PRIORITY: Mapping[str, int] = {"N": 1, "C": 2}
+
+
+def flag_rank(flag: str | None) -> int:
+    """Lower is better. None (unflagged) beats `N` beats `C` beats anything else."""
+    if flag is None:
+        return 0
+    return _FLAG_PRIORITY.get(flag, len(_FLAG_PRIORITY) + 1)
 
 
 class DiscoverError(ValueError):
@@ -167,15 +176,9 @@ def _dedup_by_flag(candidates: list[RawInput]) -> list[RawInput]:
     for raw in candidates:
         key = (raw.trade_type, raw.year, raw.month)
         current = chosen.get(key)
-        if current is None or _flag_rank(raw.flag) < _flag_rank(current.flag):
+        if current is None or flag_rank(raw.flag) < flag_rank(current.flag):
             chosen[key] = raw
     return sorted(chosen.values(), key=lambda r: (r.trade_type, r.year, r.month))
-
-
-def _flag_rank(flag: str | None) -> int:
-    if flag is None:
-        return 0
-    return _FLAG_PRIORITY.get(flag, len(_FLAG_PRIORITY) + 1)
 
 
 def ytd_filter(raw_inputs: Iterable[RawInput], *, current_year: int) -> list[RawInput]:

@@ -23,6 +23,7 @@ from pathlib import Path
 from loguru import logger
 
 from microtrade.config import ProjectConfig
+from microtrade.discover import flag_rank
 from microtrade.ops.manifest import (
     RawManifest,
     SpecManifest,
@@ -156,12 +157,13 @@ def plan_stage2(
     mt_hash = microtrade_hash or file_sha256(settings.microtrade_yaml)
     source_dir = settings.raw_remote_dir / "current"
 
-    years: dict[YearKey, list[Path]] = {}
-    dirty_keys: set[YearKey] = set()
-
     if not source_dir.exists():
         return {}
 
+    # Pick the winning flag per (trade_type, year, month) here so transport
+    # never pulls the loser. `discover._dedup_by_flag` would still pick `N`
+    # at ingest, but only after the `C` zip already crossed the network.
+    winners: dict[tuple[str, int, int], tuple[Match, Path]] = {}
     for raw in sorted(source_dir.iterdir()):
         if not raw.is_file() or raw.suffix != ".zip":
             continue
@@ -169,6 +171,14 @@ def plan_stage2(
         if m is None:
             logger.warning("no matching sheet for raw file: {}", raw.name)
             continue
+        month_key = (m.trade_type, int(m.year), int(m.month))
+        current = winners.get(month_key)
+        if current is None or flag_rank(m.flag) < flag_rank(current[0].flag):
+            winners[month_key] = (m, raw)
+
+    years: dict[YearKey, list[Path]] = {}
+    dirty_keys: set[YearKey] = set()
+    for _, (m, raw) in sorted(winners.items()):
         key = YearKey(m.trade_type, int(m.year))
         years.setdefault(key, []).append(raw)
 

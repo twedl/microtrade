@@ -177,6 +177,27 @@ def test_stage2_separates_by_trade_type_and_year(tree):
     assert plan[YearKey("exports_us", 2020)] == [c]
 
 
+def test_stage2_dedup_picks_N_over_C(tree):
+    """When both `N` and `C` snapshots exist for the same (trade_type, year,
+    month), the planner returns only the `N` path so transport doesn't pull
+    the `C` bytes that ingest would discard anyway.
+    """
+    settings, _root = tree
+    c_raw = _write_raw(tree, "S1_202001C.TXT.zip", b"c")
+    n_raw = _write_raw(tree, "S1_202001N.TXT.zip", b"n")
+    plan = plan_stage2(settings, _load_cfg(tree))
+    assert plan == {YearKey("imports", 2020): [n_raw]}
+    assert c_raw not in plan[YearKey("imports", 2020)]
+
+
+def test_stage2_dedup_keeps_C_when_N_missing(tree):
+    """A month with only `C` (no `N`) still ships — `C` is the only winner."""
+    settings, _root = tree
+    c_raw = _write_raw(tree, "S1_202001C.TXT.zip", b"c")
+    plan = plan_stage2(settings, _load_cfg(tree))
+    assert plan == {YearKey("imports", 2020): [c_raw]}
+
+
 def test_stage2_all_clean_returns_empty(tree):
     settings, _root = tree
     a = _write_raw(tree, "S1_202001N.TXT.zip")
