@@ -6,6 +6,25 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.26] - 2026-05-22
+
+### Changed
+
+- `microtrade.ops.planner.plan_stage2` now dedupes raw zips by
+  `(trade_type, year, month)` flag before bucketing them by
+  `YearKey`. When a month ships both `N` and `C` snapshots,
+  `pull_raws_for_year` now copies only the `N` winner instead of
+  both; `discover._dedup_by_flag` still applies at ingest as
+  before, but the `C` bytes never cross the network. Net effect:
+  roughly half the bytes pulled per year on archives that ship
+  both flag variants. Ingest output is unchanged.
+
+### Added
+
+- `microtrade.discover.flag_rank(flag) -> int` (promoted from the
+  private `_flag_rank`) so the ops planner can apply the same
+  priority rule the discover layer uses (None > N > C > other).
+
 ## [0.2.25] - 2026-05-15
 
 ### Added
