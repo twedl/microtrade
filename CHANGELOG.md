@@ -6,6 +6,26 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.27] - 2026-05-24
+
+### Changed
+
+- `microtrade.ops.planner.plan_stage2` now picks a single winning
+  snapshot per `(trade_type, year)` instead of one per
+  `(trade_type, year, month)`. Raws are YTD snapshots — a YYYY-12
+  file covers Jan..Dec and supersedes earlier months — so
+  transport was paying the network cost for older months that
+  `discover.latest_snapshot_per_year` would discard at ingest.
+  Net effect on archives with monthly YTD snapshots: roughly 12x
+  less data pulled per year, on top of the 0.2.26 N/C dedup.
+  Ingest output is unchanged.
+- Priority comparator (latest snapshot month, flag_rank as
+  tie-break) is the same rule the discover layer applies at
+  ingest, just hoisted up to planner time. Stat + hash +
+  output-present checks now run at most once per
+  `(trade_type, year)` instead of once per surviving snapshot
+  month — strict I/O reduction on the remote filer.
+
 ## [0.2.26] - 2026-05-22
 
 ### Changed
