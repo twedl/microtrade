@@ -152,13 +152,14 @@ def test_stage2_unmatched_file_skipped(tree):
     assert plan_stage2(settings, _load_cfg(tree)) == {}
 
 
-def test_stage2_groups_months_of_same_year(tree):
+def test_stage2_picks_latest_snapshot_per_year(tree):
+    """YTD snapshots: a YYYY-02 file supersedes YYYY-01 (covers Jan + Feb),
+    so only the latest month per (trade_type, year) ships to transport."""
     settings, _root = tree
-    a = _write_raw(tree, "S1_202001N.TXT.zip")
-    b = _write_raw(tree, "S1_202002N.TXT.zip")
+    _write_raw(tree, "S1_202001N.TXT.zip", b"older")
+    latest = _write_raw(tree, "S1_202002N.TXT.zip", b"latest")
     plan = plan_stage2(settings, _load_cfg(tree))
-    assert set(plan.keys()) == {YearKey("imports", 2020)}
-    assert set(plan[YearKey("imports", 2020)]) == {a, b}
+    assert plan == {YearKey("imports", 2020): [latest]}
 
 
 def test_stage2_separates_by_trade_type_and_year(tree):
@@ -205,14 +206,16 @@ def test_stage2_all_clean_returns_empty(tree):
     assert plan_stage2(settings, _load_cfg(tree)) == {}
 
 
-def test_stage2_dirty_year_includes_clean_siblings(tree):
+def test_stage2_older_snapshot_manifest_does_not_clean_year(tree):
+    """A clean manifest for an older snapshot doesn't make the year clean —
+    the latest snapshot (which actually drives ingest) hasn't been processed
+    yet, so the year still needs work."""
     settings, _root = tree
-    clean = _write_raw(tree, "S1_202001N.TXT.zip", b"clean")
-    dirty = _write_raw(tree, "S1_202002N.TXT.zip", b"dirty")
-    _mark_raw_clean(tree, clean, trade_type="imports", year="2020", month="01", flag="N")
+    older = _write_raw(tree, "S1_202001N.TXT.zip", b"older")
+    latest = _write_raw(tree, "S1_202002N.TXT.zip", b"latest")
+    _mark_raw_clean(tree, older, trade_type="imports", year="2020", month="01", flag="N")
     plan = plan_stage2(settings, _load_cfg(tree))
-    assert set(plan.keys()) == {YearKey("imports", 2020)}
-    assert set(plan[YearKey("imports", 2020)]) == {clean, dirty}
+    assert plan == {YearKey("imports", 2020): [latest]}
 
 
 def test_stage2_raw_content_changed(tree):

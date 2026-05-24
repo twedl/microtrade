@@ -160,10 +160,12 @@ def plan_stage2(
     if not source_dir.exists():
         return {}
 
-    # Pick the winning flag per (trade_type, year, month) here so transport
-    # never pulls the loser. `discover._dedup_by_flag` would still pick `N`
-    # at ingest, but only after the `C` zip already crossed the network.
-    winners: dict[tuple[str, int, int], tuple[Match, Path]] = {}
+    # Pick a single winning snapshot per (trade_type, year) so transport
+    # never pulls a superseded zip. Raws are YTD snapshots: a YYYY-12 file
+    # covers Jan..Dec and supersedes YYYY-11 etc., so only the latest month
+    # carries new data. For ties on snapshot month, fall back to flag_rank
+    # (None > N > C).
+    winners: dict[YearKey, tuple[Match, Path]] = {}
     for raw in sorted(source_dir.iterdir()):
         if not raw.is_file() or raw.suffix != ".zip":
             continue
@@ -171,22 +173,13 @@ def plan_stage2(
         if m is None:
             logger.warning("no matching sheet for raw file: {}", raw.name)
             continue
-        month_key = (m.trade_type, int(m.year), int(m.month))
-        current = winners.get(month_key)
-        if current is None or flag_rank(m.flag) < flag_rank(current[0].flag):
-            winners[month_key] = (m, raw)
-
-    years: dict[YearKey, list[Path]] = {}
-    dirty_keys: set[YearKey] = set()
-    for _, (m, raw) in sorted(winners.items()):
         key = YearKey(m.trade_type, int(m.year))
-        years.setdefault(key, []).append(raw)
+        current = winners.get(key)
+        if current is None or _snapshot_priority(m) > _snapshot_priority(current[0]):
+            winners[key] = (m, raw)
 
-        # Once a year is known dirty, every raw in it will be reprocessed;
-        # re-checking further raws in that year is wasted I/O.
-        if key in dirty_keys:
-            continue
-
+    dirty_keys: set[YearKey] = set()
+    for key, (_, raw) in sorted(winners.items()):
         manifest = read_manifest(settings.raw_manifests_dir, raw.name, RawManifest)
         if manifest is None or manifest.microtrade_hash != mt_hash:
             dirty_keys.add(key)
@@ -201,4 +194,9 @@ def plan_stage2(
         ):
             dirty_keys.add(key)
 
-    return {k: years[k] for k in dirty_keys}
+    return {k: [winners[k][1]] for k in dirty_keys}
+
+
+def _snapshot_priority(m: Match) -> tuple[int, int]:
+    """Higher wins. Sort by latest month first; break ties with negated flag_rank."""
+    return (int(m.month), -flag_rank(m.flag))
